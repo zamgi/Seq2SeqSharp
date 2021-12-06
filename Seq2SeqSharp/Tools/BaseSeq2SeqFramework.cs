@@ -202,12 +202,13 @@ namespace Seq2SeqSharp.Tools
             }
         }
 
-        public bool SaveModel(bool createBackupPrevious = false) => SaveModelImpl(m_modelMetaData, createBackupPrevious);
-        protected virtual bool SaveModelImpl(T model, bool createBackupPrevious = false) => SaveModelRoutine(model, Model_4_ProtoBufSerializer.Create, createBackupPrevious);
+        public bool SaveModel(bool createBackupPrevious = false, string suffix = "") => SaveModelImpl(m_modelMetaData, createBackupPrevious, suffix);
+        protected virtual bool SaveModelImpl(T model, bool createBackupPrevious = false, string suffix = "") => SaveModelRoutine(model, Model_4_ProtoBufSerializer.Create, createBackupPrevious, suffix);
         protected abstract T LoadModelImpl();
-        protected bool SaveModelRoutine<ProtoBuf_T>(T model, Func<T, ProtoBuf_T> createModel4SerializeFunc, bool createBackupPrevious = false)
+        protected bool SaveModelRoutine<ProtoBuf_T>(T model, Func<T, ProtoBuf_T> createModel4SerializeFunc, bool createBackupPrevious = false, string suffix = "")
         {
-            var fn = Path.GetFullPath(m_modelFilePath);
+            string modelFilePath = m_modelFilePath + suffix;
+            var fn = Path.GetFullPath(modelFilePath);
             var dir = Path.GetDirectoryName(fn); if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
             try
             {
@@ -218,7 +219,7 @@ namespace Seq2SeqSharp.Tools
                     File.Copy(fn, $"{fn}.bak", true);
                 }
 
-                using (var fs = new FileStream(m_modelFilePath, FileMode.Create, FileAccess.Write))
+                using (var fs = new FileStream(modelFilePath, FileMode.Create, FileAccess.Write))
                 {
                     SaveParameters(model);
 
@@ -386,6 +387,7 @@ namespace Seq2SeqSharp.Tools
                                 {
                                     if (excep is OutOfMemoryException)
                                     {
+                                        GC.Collect();
                                         isOutOfMemException = true;
                                         oomMessage = excep.Message;
                                         break;
@@ -426,6 +428,7 @@ namespace Seq2SeqSharp.Tools
                         }
                         catch (OutOfMemoryException err)
                         {
+                            GC.Collect();
                             batchSplitFactor = TryToSplitBatchFactor(sntPairBatchs, batchSplitFactor, err.Message);
                             if (batchSplitFactor < 0)
                             {
@@ -574,6 +577,7 @@ namespace Seq2SeqSharp.Tools
                     }
                     catch (OutOfMemoryException err)
                     {
+                        GC.Collect();
                         throw err;
                     }
                     catch (Exception err)
@@ -616,6 +620,8 @@ namespace Seq2SeqSharp.Tools
                 //---SaveModel_As_BinaryFormatter();
                 SaveModel(createBackupPrevious: true);
             }
+
+            SaveModel(createBackupPrevious: false, suffix: ".latest");
         }
 
 
@@ -925,12 +931,12 @@ namespace Seq2SeqSharp.Tools
                     ISntPairBatch sntPairBatch = sntPairBatchs[i];
                     ISntPairBatch sntPairBatchForValid = sntPairBatch.CloneSrcTokens();
 
-                     // Create a new computing graph instance
-                     List<NetworkResult> nrs;
+                    // Create a new computing graph instance
+                    List<NetworkResult> nrs;
                     using (IComputeGraph computeGraph = CreateComputGraph(i, needBack: false))
                     {
-                         // Run forward part
-                         nrs = RunNetwork(computeGraph, sntPairBatchForValid, i, false);
+                        // Run forward part
+                        nrs = RunNetwork(computeGraph, sntPairBatchForValid, i, false);
                     }
 
                     lock (locker)
@@ -995,6 +1001,12 @@ namespace Seq2SeqSharp.Tools
                         }
 
                     }
+                }
+                catch (OutOfMemoryException err)
+                {
+                    GC.Collect(); // Collect unused tensor objects and free GPU memory
+
+                    Logger.WriteLine(Logger.Level.err, ConsoleColor.Red, $"Skip current batch for validation due to {err.Message}");
                 }
                 catch (Exception err)
                 {
