@@ -59,6 +59,8 @@ namespace Seq2SeqSharp
         IWeightTensor Gather(IWeightTensor src, IWeightTensor indices, int dim);
         IWeightTensor Scatter(IWeightTensor source, IWeightTensor indices, int dim, params long[] shape);
         IWeightTensor Scatter(IWeightTensor indices, float val, int dim, bool runGradient = true, params long[] shape);
+        IWeightTensor ScatterAdd(IWeightTensor source, IWeightTensor indices, int dim, params long[] shape);
+
         IWeightTensor Sub(float v, IWeightTensor w1);
 
         #region Operations for masking
@@ -78,6 +80,8 @@ namespace Seq2SeqSharp
 
         IWeightTensor Rsqrt(IWeightTensor w);
 
-        (IWeightTensor, float) Softmax_Cross_Entropy_Loss(IWeightTensor ffLayer, IWeightTensor truthTgtSeqs, bool inPlace = false);
+        IWeightTensor Div(IWeightTensor w, float v, bool inPlace = false);
+
+        float CrossEntropyLoss(IWeightTensor probs, IWeightTensor truthTgtSeqs, float graident = 1.0f, bool avgLoss = false);
     }
 }

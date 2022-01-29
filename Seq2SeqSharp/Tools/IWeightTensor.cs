@@ -49,6 +49,10 @@ namespace Seq2SeqSharp.Tools
 
         IAllocator Allocator { get; }
 
+        void FillGradient(float val);
 
+        void Clamp(float min, float max);
+
+        long ElementCount { get; }
     }
 }

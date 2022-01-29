@@ -42,7 +42,7 @@ template<typename T> INLINE_FUNC T rdiv_op(T x, T y) { return (T)(y / x); }
 INFIX_TO_FUNC(add_op, +)
 INFIX_TO_FUNC(sub_op, -)
 INFIX_TO_FUNC(mul_op, *)
-INFIX_TO_FUNC(div_op, /)
+//INFIX_TO_FUNC(div_op, /)
 
 INFIX_TO_FUNC(gt_op, >)
 INFIX_TO_FUNC(lt_op, <)
@@ -76,13 +76,13 @@ template <typename T> INLINE_FUNC T sgn(T val) {
 	return T(0);
 }
 
-template <typename T> INLINE_FUNC T Clamp(T val, T min, T max) {
-	if (val < min)
-		return min;
-	if (val > max)
-		return max;
-	return val;
-}
+//template <typename T> INLINE_FUNC T Clamp(T val, T min, T max) {
+//	if (val < min)
+//		return min;
+//	if (val > max)
+//		return max;
+//	return val;
+//}
 
 template <typename T> INLINE_FUNC T MaskFill(T t, T mask, T defValue) {
 	if (mask == T(0))
@@ -209,19 +209,19 @@ int TS_MaskFill(TensorRef* result, TensorRef* srcX, TensorRef* srcY, float v)
 
 
 
-template<typename T>
-INLINE_FUNC void Clamp_Apply(TensorRef* result, TensorRef* src, float min, float max)
-{
-	auto func = [min, max](T *r, T *s) { *r = Clamp(*s, (T)min, (T)max); };
-	Apply2<T, T>(result, src, func);
-}
+//template<typename T>
+//INLINE_FUNC void Clamp_Apply(TensorRef* result, TensorRef* src, float min, float max)
+//{
+//	auto func = [min, max](T *r, T *s) { *r = Clamp(*s, (T)min, (T)max); };
+//	Apply2<T, T>(result, src, func);
+//}
 
-int TS_Clamp(TensorRef* result, TensorRef* src, float min, float max)
-{
-	API_BEGIN()
-	SWITCH_TENSOR_TYPE_FLOAT(result->elementType, Clamp_Apply, result, src, min, max)
-	API_END()
-}
+//int TS_Clamp(TensorRef* result, TensorRef* src, float min, float max)
+//{
+//	API_BEGIN()
+//	SWITCH_TENSOR_TYPE_FLOAT(result->elementType, Clamp_Apply, result, src, min, max)
+//	API_END()
+//}
 
 
 #define DECLARE_T_S_ALL_CPU_TYPES(EXPORTNAME, FUNCNAME)\
@@ -240,7 +240,7 @@ int EXPORTNAME(TensorRef* result, TensorRef* lhs, float rhs)\
 
 
 DECLARE_T_S_ALL_CPU_TYPES(TS_Sub, sub_op)
-DECLARE_T_S_ALL_CPU_TYPES(TS_Div, div_op)
+//DECLARE_T_S_ALL_CPU_TYPES(TS_Div, div_op)
 DECLARE_T_S_ALL_CPU_TYPES(TS_Rdiv, rdiv_op)
 DECLARE_T_S_ALL_CPU_TYPES(TS_Mod, Mod_op)
 
@@ -266,7 +266,7 @@ int EXPORTNAME(TensorRef* result, TensorRef* lhs, TensorRef* rhs)\
 	API_END()\
 }
 
-DECLARE_T_T_ALL_CPU_TYPES(TS_CDiv, div_op)
+//DECLARE_T_T_ALL_CPU_TYPES(TS_CDiv, div_op)
 DECLARE_T_T_ALL_CPU_TYPES(TS_CMod, Mod_op)
 
 DECLARE_T_T_ALL_CPU_TYPES(TS_gtTensor, gt_op)
