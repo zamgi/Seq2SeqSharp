@@ -535,10 +535,11 @@ namespace Seq2SeqSharp.Tools
         public IWeightTensor Sum(IWeightTensor w, int dim)
         {
             WeightTensor m = w as WeightTensor;
-            var resultWeights = Ops.Sum(null, m.TWeight, dim);
+            var newSizes = (long[])m.Sizes.Clone();
+            newSizes[dim] = 1;
 
-            WeightTensor res = m_weightTensorFactory.CreateWeightTensor(resultWeights.Sizes, m_deviceId, name: $"{GetHashString(m.Name)}.Sum", graphToBind: this, needGradient: m.NeedGradient);
-            res.TWeight = resultWeights;
+            WeightTensor res = m_weightTensorFactory.CreateWeightTensor(newSizes, m_deviceId, name: $"{m.Name}.Sum", graphToBind: this, needGradient: m.NeedGradient);
+            Ops.Sum(res.TWeight, m.TWeight, dim);
 
             if (m_needsBackprop)
             {
@@ -1153,6 +1154,9 @@ namespace Seq2SeqSharp.Tools
                     res.Dispose();
                 }
                 m_backprop.Add(backward);
+
+                res.UnbindFromComputeGraph();
+
             }
 
             return res;
@@ -1563,7 +1567,7 @@ namespace Seq2SeqSharp.Tools
 
 
             WeightTensor m = w as WeightTensor;
-            WeightTensor res = m_weightTensorFactory.CreateWeightTensor(dims, m_deviceId, name: w.Name, graphToBind: this, needGradient: m.NeedGradient);
+            WeightTensor res = m_weightTensorFactory.CreateWeightTensor(dims, m_deviceId, name: $"{w.Name}.View", graphToBind: this, needGradient: m.NeedGradient);
             //  VisualizeNodes(w, res);
 
             res.TWeight = m.TWeight.View(dims);
@@ -1694,8 +1698,11 @@ namespace Seq2SeqSharp.Tools
                     if (m.NeedGradient)
                     {
                         res.ReleaseWeight();
-                        using var mGExp = m.TGradient.Expand(dims);
-                        Ops.Add(mGExp, mGExp, res.TGradient);
+
+                        using var tmpMGrad = m.TGradient.Expand(dims); // expand input tensor at first
+                        Ops.AtomicAdd(tmpMGrad, res.TGradient);
+
+
                     }
                     res.Dispose();
                 }
@@ -2096,49 +2103,18 @@ namespace Seq2SeqSharp.Tools
             return res;
         }
 
-        //public float Cross_Entropy_Loss(IWeightTensor probs, IWeightTensor truthTgtSeqs)
-        //{
-        //    probs = Log(probs);
 
-        //    var scatterIdxTensor = View(truthTgtSeqs, new long[] { -1, 1 });
-        //    var oneHotTensor = Scatter(scatterIdxTensor, 1.0f, 1, shape: probs.Sizes);
-        //    var loss = EltMul(probs, oneHotTensor);
-
-        //    var lossSum = Sum(loss, 1);
-        //    lossSum = Mul(lossSum, -1.0f);
-        //    lossSum = Sum(lossSum, 0);
-
-        //    var lossMean = Div(lossSum, (float)probs.Sizes[0]);
-        //    lossMean.FillGradient(1.0f);
-
-        //    return lossMean.GetWeightAt(new long[] { 0, 0 });
-        //}
-
-
-        public float CrossEntropyLoss(IWeightTensor probs, IWeightTensor truthTgtSeqs, float graident = 1.0f, bool avgLoss = false)
+        public float CrossEntropyLoss(IWeightTensor probs, IWeightTensor truthTgtSeqs, float graident = 1.0f)
         {
             var scatterIdxTensor = View(truthTgtSeqs, new long[] { -1, 1 });
             var loss = Gather(probs, scatterIdxTensor, 1);
+
             loss = Log(loss);
-            loss = Sum(loss, 0);
-
-            float cost = 0.0f;
-            if (avgLoss)
-            {
-                loss = Div(loss, (float)scatterIdxTensor.ElementCount * -1.0f);
-                cost = loss.GetWeightAt(new long[] { 0, 0 });
-            }
-            else
-            {
-                loss = Mul(loss, -1.0f);
-                cost = loss.GetWeightAt(new long[] { 0, 0 }) / scatterIdxTensor.ElementCount;
-            }
-
+            loss = Mul(loss, -1.0f);
             loss.FillGradient(graident);
 
-            return cost;
+            return loss.ToWeightArray().Sum() / loss.ElementCount;
         }
-
 
 
         public void Dispose()
