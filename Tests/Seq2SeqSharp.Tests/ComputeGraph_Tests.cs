@@ -1,4 +1,14 @@
-﻿using AdvUtils;
+﻿// Copyright (c) Zhongkai Fu. All rights reserved.
+// https://github.com/zhongkaifu/Seq2SeqSharp
+//
+// This file is part of Seq2SeqSharp.
+//
+// Seq2SeqSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
+//
+// Seq2SeqSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
+
+using AdvUtils;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Seq2SeqSharp.Tools;
 using System;
@@ -142,13 +152,47 @@ public class ComputeGraph_Tests
         float sum2 = tensorSumWeights.Sum();
 
 
-        sum1 = (float)Math.Round(sum1, 5);
-        sum2 = (float)Math.Round(sum2, 5);
+        sum1 = (float)Math.Round(sum1, 4);
+        sum2 = (float)Math.Round(sum2, 4);
 
         Logger.WriteLine($"sum from .net core = '{sum1}', sum from sum operator = '{sum2}'");
 
         Assert.IsTrue(sum1 == sum2);
 
+    }
+
+
+    [TestMethod]
+    public void TestMean()
+    {
+        int batchSize = 5;
+        int vocabSize = 20;
+        TensorAllocator.InitDevices(ProcessorTypeEnums.CPU, new int[] { 0 });
+        var graph = new ComputeGraphTensor(new WeightTensorFactory(), 0, true);
+
+        var tensorA = BuildRandomTensor(shape: new long[2] { batchSize, vocabSize }, name: "tensorA", isTrainable: true);
+        var tensorMean = graph.Mean(tensorA, 1);
+
+        var tensorWeights = tensorA.ToWeightArray();
+        var tensorMeanWegiths = tensorMean.ToWeightArray();
+
+
+        for (int i = 0; i < batchSize; i++)
+        {
+            float sum = 0.0f;
+            for (int j = 0; j < vocabSize; j++)
+            {
+                sum += tensorWeights[i * vocabSize + j];
+            }
+            float mean = sum / vocabSize;
+
+            float mean1 = (float)Math.Round(mean, 4);
+            float mean2 = (float)Math.Round(tensorMeanWegiths[i], 4);
+
+            Logger.WriteLine($"row '{i}': mean from .net core = '{mean1}', mean from mean operator = '{mean2}'");
+
+            Assert.IsTrue(mean1 == mean2);
+        }
     }
 
 
@@ -174,8 +218,13 @@ public class ComputeGraph_Tests
         var tensorSumWeights = tensorA.ToWeightArray();
         float sum2 = tensorSumWeights.Sum();
 
-        Assert.IsTrue(Math.Round(sum, 5) == Math.Round(sum2, 5));
+        double r1 = Math.Round(sum, 4);
+        double r2 = Math.Round(sum2, 4);
 
+
+        Logger.WriteLine($"sum = '{sum}', sum2 = '{sum2}', r1 = '{r1}', r2 = '{r2}'");
+
+        Assert.IsTrue(r1 == r2);
     }
 
 
@@ -206,11 +255,11 @@ public class ComputeGraph_Tests
 
                 if (tensorIdx.GetWeightAt(new long[] {i, 0}) != j)
                 {
-                    Assert.IsTrue(Math.Round(tensorAGrad, 5) == Math.Round(softmaxWeight, 5));
+                    Assert.IsTrue(Math.Round(tensorAGrad, 4) == Math.Round(softmaxWeight, 4));
                 }
                 else
                 {
-                    Assert.IsTrue(Math.Round(tensorAGrad, 5) == Math.Round(softmaxWeight - 1.0f, 5));
+                    Assert.IsTrue(Math.Round(tensorAGrad, 4) == Math.Round(softmaxWeight - 1.0f, 4));
                 }
             }
         }
