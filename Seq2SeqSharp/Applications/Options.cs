@@ -136,6 +136,10 @@ namespace Seq2SeqSharp.Applications
         [Arg("Training corpus folder path", nameof(TrainCorpusPath))]
         public string TrainCorpusPath = null;
 
+
+        [Arg("The max degress of parallelism in task. Default is 1", nameof(TaskParallelism))]
+        public int TaskParallelism = 1;
+
         [Arg("Update parameters every N batches. Default is 1", nameof(UpdateFreq))]
         public int UpdateFreq = 1;
 
@@ -145,6 +149,9 @@ namespace Seq2SeqSharp.Applications
         [Arg("Start to run validation after N updates. Default is 20,000", nameof(StartValidAfterUpdates))]
         public int StartValidAfterUpdates = 20000;
 
+        [Arg("Run validation every certain updates", nameof(RunValidEveryUpdates))]
+        public int RunValidEveryUpdates = 10000;
+
         [Arg("Valid corpus folder path", nameof(ValidCorpusPaths))]
         public string ValidCorpusPaths = null;
 
@@ -153,9 +160,6 @@ namespace Seq2SeqSharp.Applications
 
         [Arg("The number of updates for weights", nameof(WeightsUpdateCount))]
         public int WeightsUpdateCount = 0;
-
-        [Arg("The interval hours to run model validation", nameof(ValidIntervalHours))]
-        public float ValidIntervalHours = 1.0f;
 
         [Arg("The size of vocabulary in source side", nameof(SrcVocabSize))]
         public int SrcVocabSize = 45000;
