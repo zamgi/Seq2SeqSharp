@@ -51,252 +51,190 @@ namespace Seq2SeqSharp.Tools
 
         private TooLongSequence m_tooLongSequence = TooLongSequence.Ignore;
 
-        private void Shuffle(List<RawSntPair> rawSntPairs)
+        private string binaryDataSetFilePath = "";
+
+
+        public (List<Dictionary<string, int>>, List<Dictionary<string, int>>) CountTokenFreqs()
         {
-            Logger.WriteLine($"Starting shuffle {rawSntPairs.Count} sentence pairs.");
+            List<Dictionary<string, int>> sd = new List<Dictionary<string, int>>();
+            List<Dictionary<string, int>> td = new List<Dictionary<string, int>>();
 
-            if (m_shuffleEnums == ShuffleEnums.Random)
+            for (int i = 0; i < m_srcFileList.Count; i++)
             {
-                for (int i = 0; i < rawSntPairs.Count; i++)
+                Logger.WriteLine($"Start to count token frequency in '{m_srcFileList[i]}' and '{m_tgtFileList[i]}'.");
+                StreamReader srSrc = new StreamReader(m_srcFileList[i]);
+                StreamReader srTgt = new StreamReader(m_tgtFileList[i]);
+
+                while (true)
                 {
-                    int idx = rnd.Next(0, rawSntPairs.Count);
-                    RawSntPair tmp = rawSntPairs[i];
-                    rawSntPairs[i] = rawSntPairs[idx];
-                    rawSntPairs[idx] = tmp;
-                }
-
-                return;
-            }
-
-
-            //Put sentence pair with same source length into the bucket
-            Dictionary<long, List<RawSntPair>> dict = new Dictionary<long, List<RawSntPair>>(); //<source sentence length, sentence pair set>
-            foreach (RawSntPair item in rawSntPairs)
-            {
-                long length = 0;
-
-                if (m_shuffleEnums == ShuffleEnums.NoPaddingInSrc)
-                {
-                    length = item.SrcGroupLenId;
-                }
-                else if (m_shuffleEnums == ShuffleEnums.NoPadding)
-                {
-                    length = item.GroupLenId;
-                }
-                else
-                {
-                    length = item.TgtGroupLenId;
-                }
-
-                if (dict.ContainsKey(length) == false)
-                {
-                    dict.Add(length, new List<RawSntPair>());
-                }
-
-                dict[length].Add(item);
-            }
-
-            //Randomized the order of sentence pairs with same length in source side
-            Parallel.ForEach(dict, pair =>
-            //foreach (KeyValuePair<int, List<SntPair>> pair in dict)
-            {
-                Random rnd2 = new Random(DateTime.Now.Millisecond + (int)pair.Key);
-
-                List<RawSntPair> sntPairList = pair.Value;
-                for (int i = 0; i < sntPairList.Count; i++)
-                {
-                    int idx = rnd2.Next(0, sntPairList.Count);
-                    RawSntPair tmp = sntPairList[i];
-                    sntPairList[i] = sntPairList[idx];
-                    sntPairList[idx] = tmp;
-                }
-            });
-
-
-            //Split large bucket to smaller buckets
-            Dictionary<long, List<RawSntPair>> dictSB = new Dictionary<long, List<RawSntPair>>();
-
-            foreach (var pair in dict)
-            {
-                if (pair.Value.Count <= m_batchSize)
-                {
-                    if (dictSB.ContainsKey(pair.Key) == false)
+                    if (srSrc.EndOfStream && srTgt.EndOfStream)
                     {
-                        dictSB.Add(pair.Key, pair.Value);
-                    }
-                    else
-                    {
-                        dictSB[pair.Key].AddRange(pair.Value);
-                    }
-                }
-                else
-                {
-                    int N = pair.Value.Count / m_batchSize;
-
-                    for (int i = 0; i < N; i++)
-                    {
-                        var pairs = pair.Value.GetRange(i * m_batchSize, m_batchSize);
-                        dictSB.Add(pair.Key + 100000000000000 * m_maxSrcSentLength * i, pairs);
+                        break;
                     }
 
-                    if (pair.Value.Count % m_batchSize != 0)
+                    string srcLine = srSrc.ReadLine();
+                    string tgtLine = srTgt.ReadLine();
+
+                    if (srcLine.IsNullOrEmpty() && tgtLine.IsNullOrEmpty())
                     {
-                        dictSB.Add(pair.Key + 100000000000000 * m_maxSrcSentLength * N, pair.Value.GetRange(m_batchSize * N, pair.Value.Count % m_batchSize));
+                        break;
+                    }
+
+                    string[] srcGroups = srcLine.Split('\t');
+                    string[] tgtGroups = tgtLine.Split('\t');
+
+                    if (srcGroups.Length != tgtGroups.Length)
+                    {
+                        throw new InvalidDataException("Inconsistent group size between source side and target side.");
+                    }
+
+                    if (sd.Count == 0)
+                    {
+                        for (int j = 0; j < srcGroups.Length; j++)
+                        {
+                            sd.Add(new Dictionary<string, int>());
+                            td.Add(new Dictionary<string, int>());
+                        }
+                    }
+
+                    for (int j = 0; j < srcGroups.Length; j++)
+                    {
+                        string[] srcTokens = srcGroups[j].Split(' ');
+                        string[] tgtTokens = tgtGroups[j].Split(' ');
+
+
+                        foreach (var srcToken in srcTokens)
+                        {
+                            if (sd[j].ContainsKey(srcToken) == false)
+                            {
+                                sd[j].Add(srcToken, 0);
+                            }
+                            sd[j][srcToken]++;
+                        }
+
+                        foreach (var tgtToken in tgtTokens)
+                        {
+                            if (td[j].ContainsKey(tgtToken) == false)
+                            {
+                                td[j].Add(tgtToken, 0);
+                            }
+                            td[j][tgtToken]++;
+                        }
+
                     }
                 }
             }
 
-            rawSntPairs.Clear();
 
-            long[] keys = dictSB.Keys.ToArray();
-            for (int i = 0; i < keys.Length; i++)
+            for (int j = 0; j < sd.Count; j++)
             {
-                int idx = rnd.Next(0, keys.Length);
-                long  tmp = keys[i];
-                keys[i] = keys[idx];
-                keys[idx] = tmp;
+                Logger.WriteLine($"Original token size at group '{j}' source = '{sd[j].Count}' target = '{td[j].Count}'");
             }
 
-            foreach (long key in keys)
-            {
-                rawSntPairs.AddRange(dictSB[key]);
-            }
-
+            return (sd, td);
         }
 
-        private (string, string) ShuffleAll()
-        {
-            object locker = new object();
-            object lockerForShuffle = new object();
 
+        private Dictionary<long, LinkedList<long>> BuildIndex()
+        {
             SortedDictionary<int, int> dictSrcLenDist = new SortedDictionary<int, int>();
             SortedDictionary<int, int> dictTgtLenDist = new SortedDictionary<int, int>();
-
-            string srcShuffledFilePath = Path.Combine(Directory.GetCurrentDirectory(), Path.GetRandomFileName() + ".tmp");
-            string tgtShuffledFilePath = Path.Combine(Directory.GetCurrentDirectory(), Path.GetRandomFileName() + ".tmp");
-
-            Logger.WriteLine($"Loading and shuffling corpus from '{m_srcFileList.Count}' files.");
-
-            StreamWriter swSrc = new StreamWriter(srcShuffledFilePath, false);
-            StreamWriter swTgt = new StreamWriter(tgtShuffledFilePath, false);
-            
             int corpusSize = 0;
             int tooLongSrcSntCnt = 0;
             int tooLongTgtSntCnt = 0;
+            string randomFileName = Path.GetRandomFileName();
+            Logger.WriteLine($"Loading and shuffling corpus from '{m_srcFileList.Count}' files.");
 
-            Parallel.For(0, m_srcFileList.Count, i =>
+            binaryDataSetFilePath = randomFileName + ".tmp";
+            BinaryWriter bw = new BinaryWriter(new FileStream(binaryDataSetFilePath, FileMode.Create)); 
+
+            Dictionary<long, LinkedList<long>> len2offsets = new Dictionary<long, LinkedList<long>>();
+
+            for (int i = 0; i < m_srcFileList.Count; i++)
             {
-                try
+                StreamReader srSrc = new StreamReader(m_srcFileList[i]);
+                StreamReader srTgt = new StreamReader(m_tgtFileList[i]);
+
+                while (true)
                 {
+                    if (srSrc.EndOfStream && srTgt.EndOfStream)
+                    {
+                        break;
+                    }
+
+                    RawSntPair rawSntPair = new RawSntPair(srSrc.ReadLine(), srTgt.ReadLine(), m_maxSrcSentLength, m_maxTgtSentLength, m_tooLongSequence == TooLongSequence.Truncation);
+                    if (rawSntPair.IsEmptyPair())
+                    {
+                        break;
+                    }
+
                     if (m_showTokenDist)
                     {
-                        Logger.WriteLine($"Process file '{m_srcFileList[i]}' and '{m_tgtFileList[i]}'");
+                        if (dictSrcLenDist.ContainsKey(rawSntPair.SrcLength / 100) == false)
+                        {
+                            dictSrcLenDist.Add(rawSntPair.SrcLength / 100, 0);
+                        }
+                        dictSrcLenDist[rawSntPair.SrcLength / 100]++;
+
+                        if (dictTgtLenDist.ContainsKey(rawSntPair.TgtLength / 100) == false)
+                        {
+                            dictTgtLenDist.Add(rawSntPair.TgtLength / 100, 0);
+                        }
+                        dictTgtLenDist[rawSntPair.TgtLength / 100]++;
                     }
 
-                    StreamReader srSrc = new StreamReader(m_srcFileList[i]);
-                    StreamReader srTgt = new StreamReader(m_tgtFileList[i]);
-                    List<RawSntPair> sntPairs = new List<RawSntPair>();
-
-                    while (true)
+                    bool hasTooLongSent = false;
+                    if (rawSntPair.SrcLength > m_maxSrcSentLength)
                     {
-                        if (srSrc.EndOfStream && srTgt.EndOfStream)
-                        {
-                            break;
-                        }
-
-                        RawSntPair rawSntPair = new RawSntPair(srSrc.ReadLine(), srTgt.ReadLine(), m_maxSrcSentLength, m_maxTgtSentLength, m_tooLongSequence == TooLongSequence.Truncation);
-                        if (rawSntPair.IsEmptyPair())
-                        {
-                            break;
-                        }
-
-                        if (m_showTokenDist)
-                        {
-                            lock (locker)
-                            {
-                                if (dictSrcLenDist.ContainsKey(rawSntPair.SrcLength / 100) == false)
-                                {
-                                    dictSrcLenDist.Add(rawSntPair.SrcLength / 100, 0);
-                                }
-                                dictSrcLenDist[rawSntPair.SrcLength / 100]++;
-
-                                if (dictTgtLenDist.ContainsKey(rawSntPair.TgtLength / 100) == false)
-                                {
-                                    dictTgtLenDist.Add(rawSntPair.TgtLength / 100, 0);
-                                }
-                                dictTgtLenDist[rawSntPair.TgtLength / 100]++;
-                            }
-                        }
-
-                        bool hasTooLongSent = false;
-                        if (rawSntPair.SrcLength > m_maxSrcSentLength)
-                        {
-                            Interlocked.Increment(ref tooLongSrcSntCnt);
-                            hasTooLongSent = true;
-                        }
-
-                        if (rawSntPair.TgtLength > m_maxTgtSentLength)
-                        {
-                            Interlocked.Increment(ref tooLongTgtSntCnt);
-                            hasTooLongSent = true;
-                        }
-
-                        if (hasTooLongSent)
-                        {
-                            continue;
-                        }
-
-                        sntPairs.Add(rawSntPair);
-                        Interlocked.Increment(ref corpusSize);
-
-                        if (m_blockSize > 0 && sntPairs.Count >= m_blockSize)
-                        {
-                            Shuffle(sntPairs);
-
-                            lock (lockerForShuffle)
-                            {
-                                foreach (RawSntPair item in sntPairs)
-                                {
-                                    swSrc.WriteLine(item.SrcSnt);
-                                    swTgt.WriteLine(item.TgtSnt);
-                                }
-                            }
-
-                            sntPairs.Clear();
-                        }
+                        Interlocked.Increment(ref tooLongSrcSntCnt);
+                        hasTooLongSent = true;
                     }
 
-                    srSrc.Close();
-                    srTgt.Close();
-
-                    if (sntPairs.Count > 0)
+                    if (rawSntPair.TgtLength > m_maxTgtSentLength)
                     {
-                        Shuffle(sntPairs);
-                        lock (lockerForShuffle)
-                        {
-                            foreach (RawSntPair item in sntPairs)
-                            {
-                                swSrc.WriteLine(item.SrcSnt);
-                                swTgt.WriteLine(item.TgtSnt);
-                            }
-                        }
-
-                        sntPairs.Clear();
+                        Interlocked.Increment(ref tooLongTgtSntCnt);
+                        hasTooLongSent = true;
                     }
+
+                    if (hasTooLongSent)
+                    {
+                        continue;
+                    }
+
+                    long offset = bw.BaseStream.Position;                                      
+                    bw.Write(rawSntPair.SrcSnt);
+                    bw.Write(rawSntPair.TgtSnt);
+
+                    long length = 0;
+                    if (m_shuffleEnums == ShuffleEnums.NoPaddingInSrc)
+                    {
+                        length = rawSntPair.SrcGroupLenId;
+                    }
+                    else if (m_shuffleEnums == ShuffleEnums.NoPadding)
+                    {
+                        length = rawSntPair.GroupLenId;
+                    }
+                    else
+                    {
+                        length = rawSntPair.TgtGroupLenId;
+                    }
+
+                    if (len2offsets.ContainsKey(length) == false)
+                    {
+                        len2offsets.Add(length, new LinkedList<long>());
+                    }
+                    len2offsets[length].AddLast(offset);
+
+                    Interlocked.Increment(ref corpusSize);
                 }
-                catch (Exception ex)
-                {
-                    Logger.WriteLine(Logger.Level.err, $"Failed to shuffle file '{m_srcFileList[i]}' and '{m_tgtFileList[i]}' due to '{ex.Message}'");
-                    Logger.WriteLine(Logger.Level.err, $"Call stack: {ex.StackTrace}");
 
-                    throw;
-                }
-            });
+                srSrc.Close();
+                srTgt.Close();
+            }
 
-            swSrc.Close();
-            swTgt.Close();
+            bw.Close();
 
-            Logger.WriteLine($"Shuffled '{corpusSize}' sentence pairs to file '{srcShuffledFilePath}' and '{tgtShuffledFilePath}'.");
+            Logger.WriteLine($"Shuffled '{corpusSize}' sentence pairs.");
 
             if (tooLongSrcSntCnt > 0)
             {
@@ -347,81 +285,45 @@ namespace Seq2SeqSharp.Tools
                 m_showTokenDist = false;
             }
 
-
-            return (srcShuffledFilePath, tgtShuffledFilePath);
+            return len2offsets;
         }
-
-
-        public bool SameSntLen(List<List<string>> groups, int[] lens)
-        {
-            for (int i = 0; i < lens.Length; i++)
-            {
-                if (lens[i] != groups[i].Count)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        public void UpdateSntLen(List<List<string>> groups, int[] lens)
-        {
-            for (int i = 0; i < lens.Length; i++)
-            {
-                lens[i] = groups[i].Count;
-            }
-
-        }
+        
 
         public IEnumerator<T> GetEnumerator()
         {
-            (string srcShuffledFilePath, string tgtShuffledFilePath) = ShuffleAll();
-
-            using (StreamReader srSrc = new StreamReader(srcShuffledFilePath))
+            var length2offsets = BuildIndex();
+            
+            using(BinaryReader br = new BinaryReader(new FileStream(binaryDataSetFilePath, FileMode.Open)))
             {
-                using StreamReader srTgt = new StreamReader(tgtShuffledFilePath);
-                int[] lastSrcSntLen = null;
-                int[] lastTgtSntLen = null;
-                int maxOutputsSize = m_batchSize * 10000;
+                int maxOutputsSize = m_batchSize * 10;
                 List<SntPair> outputs = new List<SntPair>();
 
-                while (true)
+                int lengthRnd = rnd.Next(length2offsets.Count);
+                long length = length2offsets.Keys.ToArray()[lengthRnd];
+                LinkedList<long> offsets = length2offsets[length];
+
+                while (length2offsets.Count > 0)
                 {
-                    string line;
-                    if ((line = srSrc.ReadLine()) == null)
+                    bool lengthChanged = false;
+                    if (offsets.Count == 0)
+                    {
+                        length2offsets.Remove(length);
+                        if (length2offsets.Count > 0)
+                        {
+                            lengthRnd = rnd.Next(length2offsets.Count);
+                            length = length2offsets.Keys.ToArray()[lengthRnd];
+                            offsets = length2offsets[length];
+                            lengthChanged = true;
+                        }
+                    }
+
+                    if (offsets.Count == 0)
                     {
                         break;
                     }
 
-                    var srcLine = line.Trim();
-                    var tgtLine = srTgt.ReadLine().Trim();
-                    SntPair sntPair = new SntPair(srcLine, tgtLine);
-
-
-                    if (lastSrcSntLen == null)
+                    if (outputs.Count > maxOutputsSize || lengthChanged == true)
                     {
-                        lastSrcSntLen = new int[sntPair.SrcTokenGroups.Count];
-                        lastTgtSntLen = new int[sntPair.TgtTokenGroups.Count];
-
-                        for (int i = 0; i < lastSrcSntLen.Length; i++)
-                        {
-                            lastSrcSntLen[i] = -1;                            
-                        }
-
-                        for (int i = 0; i < lastTgtSntLen.Length; i++)
-                        {
-                            lastTgtSntLen[i] = -1;
-                        }
-                    }
-
-
-                    if ((lastTgtSntLen[0] > 0 && m_shuffleEnums == ShuffleEnums.NoPaddingInTgt && SameSntLen(sntPair.TgtTokenGroups, lastTgtSntLen) == false) ||
-                        (lastSrcSntLen[0] > 0 && m_shuffleEnums == ShuffleEnums.NoPaddingInSrc && SameSntLen(sntPair.SrcTokenGroups, lastSrcSntLen) == false) ||
-                        (lastSrcSntLen[0] > 0 && lastTgtSntLen[0] > 0 && m_shuffleEnums == ShuffleEnums.NoPadding && (SameSntLen(sntPair.TgtTokenGroups, lastTgtSntLen) == false || SameSntLen(sntPair.SrcTokenGroups, lastSrcSntLen) == false)) ||
-                        outputs.Count > maxOutputsSize)
-                    {
-                        // InnerShuffle(outputs);
                         for (int i = 0; i < outputs.Count; i += m_batchSize)
                         {
                             int size = Math.Min(m_batchSize, outputs.Count - i);
@@ -431,18 +333,25 @@ namespace Seq2SeqSharp.Tools
                         }
 
                         outputs.Clear();
+
+                        //Force to select sequences with different length
+                        lengthRnd = rnd.Next(length2offsets.Count);
+                        length = length2offsets.Keys.ToArray()[lengthRnd];
+                        offsets = length2offsets[length];
                     }
-
-                    outputs.Add(sntPair);
-
-                    if (lastSrcSntLen != null)
+                    else
                     {
-                        UpdateSntLen(sntPair.SrcTokenGroups, lastSrcSntLen);
-                        UpdateSntLen(sntPair.TgtTokenGroups, lastTgtSntLen);
+                        long offset = offsets.First.Value;
+                        offsets.RemoveFirst();
+
+                        br.BaseStream.Seek(offset, SeekOrigin.Begin);
+                        var srcLine = br.ReadString();
+                        var tgtLine = br.ReadString();
+                        SntPair sntPair = new SntPair(srcLine, tgtLine);
+                        outputs.Add(sntPair);
                     }
                 }
 
-                // InnerShuffle(outputs);
                 for (int i = 0; i < outputs.Count; i += m_batchSize)
                 {
                     int size = Math.Min(m_batchSize, outputs.Count - i);
@@ -452,8 +361,7 @@ namespace Seq2SeqSharp.Tools
                 }
             }
 
-            File.Delete(srcShuffledFilePath);
-            File.Delete(tgtShuffledFilePath);
+            File.Delete(binaryDataSetFilePath);
         }
 
         IEnumerator IEnumerable.GetEnumerator()
