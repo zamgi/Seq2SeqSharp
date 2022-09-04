@@ -46,7 +46,7 @@ namespace Seq2SeqSharp.Layers
             m_hiddenDim = hiddenDim;
             m_expertsPerTokenFactor = expertsPerTokenFactor;
 
-            Logger.WriteLine($"Creating MoE feed forward layer. Name = '{name}', ExpertNum = '{expertNum}', HiddenDim = '{hiddenDim}', DeviceId = '{deviceId}', Dropout ratio = '{dropoutRatio}', IsTrainable = '{isTrainable}', Learning rate factor = '{learningRateFactor}', Activate Function = '{activateFunc}'");
+            Logger.WriteLine($"Creating MoE feed forward layer. Name = '{name}', ExpertNum = '{expertNum}', ExpertsPerToken = '{expertsPerTokenFactor}', HiddenDim = '{hiddenDim}', DeviceId = '{deviceId}', Dropout ratio = '{dropoutRatio}', IsTrainable = '{isTrainable}', Learning rate factor = '{learningRateFactor}', Activate Function = '{activateFunc}'");
 
             layerNorm = new LayerNormalization($"{name}.{nameof(layerNorm)}", hiddenDim, deviceId, isTrainable, learningRateFactor: learningRateFactor);
         //    routerNorm = new LayerNormalization($"{name}.{nameof(routerNorm)}", m_expertNum, deviceId, isTrainable, learningRateFactor: learningRateFactor);
@@ -80,11 +80,8 @@ namespace Seq2SeqSharp.Layers
             //Computing routing result
             using var g = graph.CreateSubGraph($"{m_name}_MoEFeedForward");
             var inputNorm = layerNorm.Norm(input, g);
-            var inputRouter = g.Affine(inputNorm, m_Router, m_RouterBias); // [batchSize * seqLen, expertNum]
-
-
-            inputRouter = g.Softmax(inputRouter); // [batchSize * seqLen, expertNum]
-
+            var inputRouterDense = g.Affine(inputNorm, m_Router, m_RouterBias); // [batchSize * seqLen, expertNum]
+            var inputRouter = g.Softmax(inputRouterDense); // [batchSize * seqLen, expertNum]
 
             if (Logger.Verbose == Logger.LogVerbose.Debug)
             {
@@ -103,30 +100,49 @@ namespace Seq2SeqSharp.Layers
 
             }
 
+            //###################Token choice top-1 expert###############################
+            inputRouter = g.AsContiguous(inputRouter); // [batchSize * seqLen, expertNum]
+            (var topValue, var topIndex) = g.TopK(inputRouter, m_expertsPerTokenFactor); // [batchSize * seqLen, m_expertsPerTokenFactor]
 
 
             if (g.NeedsBackprop)
             {
                 var routerLoss = g.Mean(inputRouter, 0); // [1, expertNum]
-                routerLoss = g.Add(routerLoss, -1.0f / (float)m_expertNum);
-                routerLoss.CopyWeightsToGradients(routerLoss);
+                var topKScatter = g.Scatter(topIndex, 1, 1, runGradient: false, shape: inputRouter.Sizes); // [batchSize * seqLen, expertNum]
+                topKScatter = g.Mean(topKScatter, 0); // [1, expertNum]
+
+                routerLoss = g.EltMul(routerLoss, topKScatter); // [1, expertNum]
+                routerLoss = g.Mean(routerLoss, 1); // [1, 1]
+                routerLoss = g.Mul(routerLoss, (float)(m_expertNum * m_expertNum) * 0.01f);
+                routerLoss.FillGradient(1.0f);
+
+                //routerLoss = g.Add(routerLoss, (float)m_expertsPerTokenFactor / (float)m_expertNum);
+                //routerLoss = g.Mul(routerLoss, 0.01f);
+                //routerLoss.CopyWeightsToGradients(routerLoss);
             }
 
-            //###################Token choice top-1 expert###############################
-            inputRouter = g.AsContiguous(inputRouter); // [batchSize * seqLen, expertNum]
-            (var topValue, var topIndex) = g.TopK(inputRouter, 1); // [batchSize * seqLen, 1]
+
+
+
+
+
+
+
+
             var topIndexArray = topIndex.ToWeightArray();
-            List<float>[] indexs = new List<float>[m_expertNum];
+            List<float>[] indexs = new List<float>[m_expertNum]; // [expertNum, token_offsets]
             for (int i = 0; i < indexs.Length; i++)
             {
                 indexs[i] = new List<float>();
             }
 
-            int threshold = input.Rows / m_expertNum + 1;
-            for (int i = 0; i < topIndexArray.Length; i++)
+            for (int i = 0; i < input.Rows; i++)
             {
-                int expertIdx = (int)topIndexArray[i];
-                indexs[expertIdx].Add(i);
+                for (int j = 0; j < m_expertsPerTokenFactor; j++)
+                {
+                    int expertIdx = (int)topIndexArray[i * m_expertsPerTokenFactor + j];
+                    indexs[expertIdx].Add(i);
+                }
             }
 
             for (int i = 0; i < m_expertNum; i++)
@@ -139,9 +155,10 @@ namespace Seq2SeqSharp.Layers
 
                 if (indexs[i].Count > 0)
                 {
+                    var scores_eI = g.Peek(inputRouter, 1, i); // [batchSize * seqLen, 1]
                     var tokenIdx_eI = g.CreateTensorWeights(new long[] { indexs[i].Count, 1 }, indexs[i].ToArray());
 
-                    var topValue_eI = g.IndexSelect(topValue, tokenIdx_eI); // [indexs[i].Count, 1]
+                    var topValue_eI = g.IndexSelect(scores_eI, tokenIdx_eI); // [indexs[i].Count, 1]
                     topValue_eI = g.Expand(topValue_eI, dims: new long[] { indexs[i].Count, inputNorm.Sizes[^1] });
 
                     var tokenEmbs = g.IndexSelect(inputNorm, tokenIdx_eI);
