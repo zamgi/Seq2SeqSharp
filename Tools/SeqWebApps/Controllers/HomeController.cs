@@ -43,8 +43,9 @@ namespace SeqWebApps.Controllers
                 tgtInput = "";
             }
 
-            if (useSrcAsPrompt)
+            if (useSrcAsPrompt && String.IsNullOrEmpty(tgtInput))
             {
+                Logger.WriteLine($"Using source text '{srcInput}' as prompt to target text.");
                 tgtInput = srcInput;
             }
 
@@ -84,11 +85,22 @@ namespace SeqWebApps.Controllers
             string prefixTgtLine = "";
 
             //The generated target tokens are too long, let's truncate it.
-            if (tgtInputText.Length > tgtContextSize)
+            var maxTgtContextSize = tgtContextSize - tokenNumToGenerate;
+            if (tgtInputText.Length > maxTgtContextSize)
             {
-                prefixTgtLine = tgtInputText.Substring(0, tgtInputText.Length - tgtContextSize);
-                tgtInputText = tgtInputText.Substring(tgtInputText.Length - tgtContextSize);
+                int idx = tgtInputText.Length - maxTgtContextSize;
+                while (idx > 0)
+                {
+                    if (tgtInputText[idx] == '。' || tgtInputText[idx] == '.' || tgtInputText[idx] == '？' || tgtInputText[idx] == '!' || tgtInputText[idx] == '?' || tgtInputText[idx] == '!')
+                    {
+                        idx++;
+                        break;
+                    }
+                    idx--;
+                }
 
+                prefixTgtLine = tgtInputText.Substring(0, idx);
+                tgtInputText = tgtInputText.Substring(idx);
             }
 
             string logStr = $"Client = '{clientIP}', SrcInput Text = '{srcInputText}', Repeat Penalty = '{repeatPenalty}', Target Context Size = '{tgtContextSize}'";
@@ -100,12 +112,11 @@ namespace SeqWebApps.Controllers
                 }
 
             }
+
             string outputText = Seq2SeqInstance.Call(srcInputText, tgtInputText, tokenNumToGenerate, random, repeatPenalty);
             outputText = prefixTgtLine + outputText;
-//            outputText = outputText.Trim();
 
             // Update logs and dump it every 1 hour when a call comes in.
-
             lock (locker)
             {
                 string truncatedOutput = outputText.Replace(srcInputText, "");
