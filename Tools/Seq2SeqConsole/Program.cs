@@ -78,7 +78,7 @@ namespace Seq2SeqConsole
                     }
 
                     // Create learning rate
-                    ILearningRate learningRate = new DecayLearningRate(opts.StartLearningRate, opts.WarmUpSteps, opts.WeightsUpdateCount);
+                    ILearningRate learningRate = new DecayLearningRate(opts.StartLearningRate, opts.WarmUpSteps, opts.WeightsUpdateCount, opts.LearningRateStepDownFactor, opts.UpdateNumToStepDownLearningRate);
 
                     // Create optimizer
                     IOptimizer optimizer = Misc.CreateOptimizer(opts);
@@ -197,6 +197,25 @@ namespace Seq2SeqConsole
                 {
                     ss = new Seq2Seq(opts);
                     ss.DumpVocabToFiles(opts.SrcVocab, opts.TgtVocab);
+                }
+                else if (opts.Task == ModeEnums.UpdateVocab)
+                {
+                    ss = new Seq2Seq(opts);
+                    Vocab srcVocab = null;
+                    Vocab tgtVocab = null;
+
+                    if (String.IsNullOrEmpty(opts.SrcVocab) == false)
+                    {
+                        Logger.WriteLine($"Replacing source vocabulary in model '{opts.ModelFilePath}' by external vocabulary '{opts.SrcVocab}'");
+                        srcVocab = new Vocab(opts.SrcVocab);
+                    }
+                    if (String.IsNullOrEmpty(opts.TgtVocab) == false)
+                    {
+                        Logger.WriteLine($"Replacing target vocabulary in model '{opts.ModelFilePath}' by external vocabulary '{opts.TgtVocab}'");
+                        tgtVocab = new Vocab(opts.TgtVocab);
+                    }
+
+                    ss.UpdateVocabs(srcVocab, tgtVocab);
                 }
                 else
                 {

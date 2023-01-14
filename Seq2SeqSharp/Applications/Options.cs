@@ -136,7 +136,7 @@ namespace Seq2SeqSharp.Applications
         [Arg("Shuffle Type. It could be NoPaddingInSrc, NoPaddingInTgt and Random", nameof(ShuffleType))]
         public ShuffleEnums ShuffleType = ShuffleEnums.Random;
 
-        [Arg("Task to execute. It could be Train, Valid, Test, DumpVocab or Help", nameof(Task))]
+        [Arg("Task to execute. It supports Train, Valid, Test, DumpVocab, UpdateVocab and Help", nameof(Task))]
         public ModeEnums Task = ModeEnums.Help;
 
         [Arg("How to deal with too long sequence. It can be Ignore or Truncation", nameof(TooLongSequence))]
@@ -180,6 +180,12 @@ namespace Seq2SeqSharp.Applications
 
         [Arg("The number of updates for weights", nameof(WeightsUpdateCount))]
         public int WeightsUpdateCount = 0;
+
+        [Arg("The step down factor of learning rate after each epoch. Default is 1.0 which is no step down.", nameof(LearningRateStepDownFactor))]
+        public float LearningRateStepDownFactor = 1.0f;
+
+        [Arg("The update num to step down learning rate. Default is 0 which means no step down.", nameof(UpdateNumToStepDownLearningRate))]
+        public int UpdateNumToStepDownLearningRate = 0;
 
         [Arg("The size of vocabulary in source side", nameof(SrcVocabSize))]
         public int SrcVocabSize = 45000;
