@@ -96,6 +96,16 @@ namespace SeqWebApps.Controllers
             tgtInputText = String.Join("", tgtLines);
 
 
+            if (tgtInputText.Length > Seq2SeqInstance.MaxTokenToGenerate)
+            {
+                Logger.WriteLine($"Target text '{tgtInputText}' is too long, so we won't generate any more text for it.");
+
+                var tgtOutputSents = SplitSents(tgtInputText);
+                tgtInputText = String.Join("<br />", tgtOutputSents);
+
+                return tgtInputText + $"<br /> !!! The length of given source text or generated target text is more than {Seq2SeqInstance.MaxTokenToGenerate} characters, please trim it shorter and retry. !!! EOS";
+            }
+           
             string prefixTgtLine = "";
 
             //The generated target tokens are too long, let's truncate it.
