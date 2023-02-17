@@ -248,7 +248,7 @@ For example: given the input sentence "▁i ▁would ▁like ▁to ▁drink ▁w
 | \<KOR\>  | \<KOR\> ▁나는 ▁당신과 ▁함께 ▁마시 길 ▁바랍니다 . | 
 
 ## GPTConsole for GPT decoder only model training and testing  
-GPTConsole is a command line tool for GPT style model training and testing.
+GPTConsole is a command line tool for GPT style model training and testing. Given text in input file per line, the model will continue generating the rest of text.  
 
 
 ## SeqClassification for sequence-classification task  
@@ -477,11 +477,70 @@ Here is an example that asking model to continue writing after "May the force be
 Here is another example of Chinese martial arts novel.  
 ![](https://raw.githubusercontent.com/zhongkaifu/Seq2SeqSharp/master/Images/FictionGeneration.gif)  
 
+You can also visit NLG demo (Translation from English to Chinese) in Huggingface website [https://huggingface.co/spaces/zhongkaifu/nlg_demo]  
+
 # Build From Source Code  
 Besides using the release package, you could also build Seq2SeqSharp from source code. It has just two steps:  
 
 1. Clone the project from github: git clone https://github.com/zhongkaifu/Seq2SeqSharp.git  
 2. Build all projects: dotnet build Seq2SeqSharp.sln --configuration Release  
+
+# Deployment  
+You can deploy Seq2SeqSharp and its tool by many different ways. Here is an example that creating Docker image for SeqWebApps.  
+Dockerfile:  
+```
+FROM python:3.9
+
+WORKDIR /code
+
+COPY ./requirements.txt /code/requirements.txt
+
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+
+RUN wget https://packages.microsoft.com/config/ubuntu/18.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+RUN dpkg -i packages-microsoft-prod.deb
+RUN rm packages-microsoft-prod.deb
+
+RUN curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh
+
+RUN apt-get update
+RUN apt-get install -y dotnet-sdk-7.0
+RUN apt-get install -y aspnetcore-runtime-7.0
+RUN apt-get install -y cmake
+RUN apt-get install -y git-lfs
+
+RUN git clone https://github.com/zhongkaifu/Seq2SeqSharp.git
+WORKDIR /code/Seq2SeqSharp
+RUN dotnet build Seq2SeqSharp.sln --configuration Release
+
+WORKDIR /code/Seq2SeqSharp/ExternalProjects
+RUN unzip SentencePiece.zip
+WORKDIR /code/Seq2SeqSharp/ExternalProjects/SentencePiece
+RUN mkdir build
+WORKDIR /code/Seq2SeqSharp/ExternalProjects/SentencePiece/build
+RUN cmake ..
+RUN make -j $(nproc)
+RUN make install
+RUN ldconfig -v
+
+WORKDIR /code
+
+#RUN git clone https://huggingface.co/zhongkaifu/mt_enu_chs
+
+RUN mkdir -p /code/bin
+RUN chmod 777 /code/bin
+WORKDIR /code/bin
+
+RUN cp -r /code/Seq2SeqSharp/Tools/SeqWebApps/bin/Release/net7.0/* .
+RUN wget https://github.com/zhongkaifu/Models/releases/download/MT_ENU_CHS/mt_enu_chs.model
+RUN wget https://huggingface.co/zhongkaifu/mt_enu_chs/resolve/main/enuSpm.model
+RUN wget https://huggingface.co/zhongkaifu/mt_enu_chs/resolve/main/cjkSpm.model
+RUN rm appsettings.json
+RUN wget https://huggingface.co/zhongkaifu/mt_enu_chs/resolve/main/appsettings.json
+#RUN cp /code/mt_enu_chs/appsettings.json .
+
+CMD ["dotnet","/code/bin/SeqWebApps.dll"]
+```
 
 # Using different CUDA versions and .NET versions  
 Seq2SeqSharp uses CUDA 11.x and .NET 7.0 by default, but you can still use different versions of them. It has already been tested on .NET core 3.1, CUDA 10.x and some other versions.  
