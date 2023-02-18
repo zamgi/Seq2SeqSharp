@@ -27,19 +27,28 @@ using Seq2SeqSharp.Utils;
 
 namespace Seq2SeqSharp.Tools
 {
+    public enum NetworkResultStatus
+    {
+        SUCCEED,
+        FAILED,
+        OOM
+    }
+
     public class NetworkResult
     {
         public float Cost;
         public List<List<List<string>>> Output; // (beam_size, batch_size, seq_len)
         public List<List<List<int>>> Alignments; // (beam_size, batch_size, seq_len)
         public List<List<List<float>>> AlignmentScores; // (beam_size, batch_size, seq_len)
+        public NetworkResultStatus Status;
+
 
         public NetworkResult()
         {
             Output = null;
             Alignments = null;
             AlignmentScores = null;
-
+            Status = NetworkResultStatus.FAILED;
         }
 
         public void RemoveDuplicatedEOS()
@@ -71,6 +80,7 @@ namespace Seq2SeqSharp.Tools
 
         public void AppendResult(NetworkResult nr)
         {
+            Status = nr.Status;
             while (Output.Count < nr.Output.Count)
             {
                 Output.Add(new List<List<string>>());
@@ -78,7 +88,6 @@ namespace Seq2SeqSharp.Tools
 
             for (int beamIdx = 0; beamIdx < nr.Output.Count; beamIdx++)
             {
-
                 for (int batchIdx = 0; batchIdx < nr.Output[beamIdx].Count; batchIdx++)
                 {
                     Output[beamIdx].Add(nr.Output[beamIdx][batchIdx]);

@@ -43,7 +43,7 @@ namespace Seq2SeqSharp
         {
             m_shuffleType = options.ShuffleType;
             m_options = options;
-
+          
             // Model must exist if current task is not for training
             if ((m_options.Task != ModeEnums.Train) && !File.Exists(m_options.ModelFilePath))
             {
@@ -69,6 +69,8 @@ namespace Seq2SeqSharp
                 CreateTrainableParameters(m_modelMetaData);
             }
 
+            m_modelMetaData.EncoderType = EncoderTypeEnums.None;
+            m_modelMetaData.DecoderType = DecoderTypeEnums.GPTDecoder;
             m_modelMetaData.ShowModelInfo();
         }
 
@@ -129,9 +131,9 @@ namespace Seq2SeqSharp
             int batchSize = tgtSnts.Count;
             var tgtTokensList = m_modelMetaData.TgtVocab.GetWordIndex(tgtSnts);
             NetworkResult nr = new NetworkResult();
+            nr.Status = NetworkResultStatus.SUCCEED;
 
             decoder.Reset(computeGraph.GetWeightFactory(), tgtSnts.Count);
-
 
             if (isTraining)
             {
@@ -165,6 +167,7 @@ namespace Seq2SeqSharp
                     {
                         GC.Collect();
                         Logger.WriteLine(Logger.Level.warn, $"We have out of memory while generating '{i}th' tokens, so terminate decoding for current sequences.");
+                        nr.Status = NetworkResultStatus.OOM;
                         break;
                     }
 
