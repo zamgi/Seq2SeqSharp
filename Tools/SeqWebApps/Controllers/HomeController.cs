@@ -8,7 +8,7 @@
 // Seq2SeqSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
-using System.Diagnostics;
+using System.IO;
 using System.Text;
 using AdvUtils;
 using Microsoft.AspNetCore.Mvc;
@@ -21,6 +21,10 @@ namespace SeqWebApps.Controllers
     public class HomeController : Controller
     {
         private readonly ILogger<HomeController> _logger;
+        private static Dictionary<string, int> ip2calls = new Dictionary<string, int>();
+        private static object locker = new object();
+
+        private static string thumbUpFilePath = Path.Combine(Directory.GetCurrentDirectory(), "thumbUp.txt");
 
         public HomeController(ILogger<HomeController> logger)
         {
@@ -33,42 +37,85 @@ namespace SeqWebApps.Controllers
         }
 
         [HttpPost]
-        public void SubmitFeedback(string srcInput, string tgtInput, bool random, float repeatPenalty, int contextSize, string clientIP, int feedBackType)
+        public void SubmitFeedback(string srcInput, string tgtInput, bool random, float repeatPenalty, string clientIP, int feedBackType)
         {
             if (feedBackType == 1)
             {
                 //Thumb Up
-                Logger.WriteLine($"ThumbUp: Random = '{random}', repeatPenalty = '{repeatPenalty}', contextSize = '{contextSize}', clientIP = '{clientIP}', Source = '{srcInput}', Target = '{tgtInput}'");
+                Logger.WriteLine($"ThumbUp: Random = '{random}', repeatPenalty = '{repeatPenalty}', clientIP = '{clientIP}', Source = '{srcInput}', Target = '{tgtInput}'");
+                lock (locker)
+                {
+                    System.IO.File.AppendAllLines(thumbUpFilePath, new string[] { srcInput + "\n" + tgtInput });
+                }
             }
             else
             {
                 //Thumb Down
-                Logger.WriteLine($"ThumbDown: Random = '{random}', repeatPenalty = '{repeatPenalty}', contextSize = '{contextSize}', clientIP = '{clientIP}', Source = '{srcInput}', Target = '{tgtInput}'");
+                Logger.WriteLine($"ThumbDown: Random = '{random}', repeatPenalty = '{repeatPenalty}', clientIP = '{clientIP}', Source = '{srcInput}', Target = '{tgtInput}'");
             }
                     
         }
 
 
         [HttpPost]
-        public IActionResult GenerateText(string srcInput, string tgtInput, int num, bool random, float repeatPenalty, int contextSize, string clientIP)
+        public IActionResult GenerateText(string srcInput, string tgtInput, int num, bool random, float repeatPenalty, string clientIP)
         {
-            if (tgtInput == null)
+            try
             {
-                Logger.WriteLine($"New Request: Random = '{random}', repeatPenalty = '{repeatPenalty}', contextSize = '{contextSize}', clientIP = '{clientIP}', Source = '{srcInput}'");
-                tgtInput = "";
+                if (tgtInput == null)
+                {
+                    Logger.WriteLine($"New Request: Random = '{random}', repeatPenalty = '{repeatPenalty}', clientIP = '{clientIP}', Source = '{srcInput}'");
+                    tgtInput = "";
+                }
+
+                lock (locker)
+                {
+                    if (ip2calls.ContainsKey(clientIP))
+                    {
+                        Logger.WriteLine($"IP '{clientIP}' has call under processing, so we ignore this call.");
+
+                        TextGenerationModel callIgnored = new TextGenerationModel
+                        {
+                            Output = "!!! Because of service capcity limitation, each client only have one call at a time, then everyone could have better experience. Please cancel the ongoing call at first, and then retry. !!!",
+                            DateTime = DateTime.Now.ToString()
+                        };
+
+                        return new JsonResult(callIgnored);
+                    }
+                    else
+                    {
+                        ip2calls.Add(clientIP, 1);
+                    }
+                }
+
+                TextGenerationModel textGeneration = new TextGenerationModel
+                {
+                    Output = CallBackend(srcInput, tgtInput, num, random, repeatPenalty),
+                    DateTime = DateTime.Now.ToString()
+                };
+
+                lock (locker)
+                {
+                    ip2calls.Remove(clientIP);
+                }
+
+                return new JsonResult(textGeneration);
             }
-
-            TextGenerationModel textGeneration = new TextGenerationModel
+            catch (Exception e)
             {
-                Output = CallBackend(srcInput, tgtInput, num, random, repeatPenalty, contextSize),
-                DateTime = DateTime.Now.ToString()
-            };
+                Logger.WriteLine($"Error: '{e.Message}'");
+                Logger.WriteLine($"Call stack: '{e.StackTrace}'");
+                lock (locker)
+                {
+                    ip2calls.Remove(clientIP);
+                }
 
-            return new JsonResult(textGeneration);
+                throw;
+            }
         }
 
 
-        private string CallBackend(string srcInputText, string tgtInputText, int tokenNumToGenerate, bool random, float repeatPenalty, int tgtContextSize)
+        private string CallBackend(string srcInputText, string tgtInputText, int tokenNumToGenerate, bool random, float repeatPenalty)
         {
             if (String.IsNullOrEmpty(srcInputText))
             {
@@ -89,9 +136,8 @@ namespace SeqWebApps.Controllers
 
             srcInputText = String.Join(" ", srcLines);
             tgtInputText = String.Join(" ", tgtLines);
-           
-            string outputText = Seq2SeqInstance.Call(srcInputText, tgtInputText, tokenNumToGenerate, random, repeatPenalty);
-            
+
+            string outputText = Seq2SeqInstance.Call(srcInputText, tgtInputText, tokenNumToGenerate, random, repeatPenalty);            
             var outputSents = SplitSents(outputText);
             return String.Join("<br />", outputSents);
 
