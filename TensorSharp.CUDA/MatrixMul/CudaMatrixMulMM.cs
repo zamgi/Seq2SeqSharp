@@ -1,6 +1,7 @@
 ﻿using ManagedCuda.BasicTypes;
 using ManagedCuda.CudaBlas;
 using System;
+using System.Runtime.CompilerServices;
 using TensorSharp.Core;
 using TensorSharp.Cpu;
 
@@ -8,6 +9,8 @@ namespace TensorSharp.CUDA.MatrixMul
 {
     public static class CudaMatrixMulMM
     {
+        public static bool EnableTensorCore = true;
+
         // Computes  c := alpha * a * b  +  beta * c
         public static void Gemm(TSCudaContext context, float alpha, Tensor a, Tensor b, float beta, Tensor c)
         {
@@ -296,8 +299,27 @@ namespace TensorSharp.CUDA.MatrixMul
                     CUdeviceptr bPtrSingle = CudaHelpers.GetBufferStart(b);
                     CUdeviceptr cPtrSingle = CudaHelpers.GetBufferStart(c);
 
-                    CublasStatus _statusF32 = CudaBlasNativeMethods.cublasSgemm_v2(blas.Value.CublasHandle,
-                        transa, transb, m, n, k, ref alpha, aPtrSingle, lda, bPtrSingle, ldb, ref beta, cPtrSingle, ldc);
+                    CublasStatus _statusF32 = CublasStatus.NotInitialized;
+                    if (EnableTensorCore == false)
+                    {
+                        _statusF32 = CudaBlasNativeMethods.cublasSgemm_v2(blas.Value.CublasHandle, transa, transb, m, n, k, ref alpha, aPtrSingle, lda, bPtrSingle, ldb, ref beta, cPtrSingle, ldc);
+
+                    }
+                    else
+                    {
+                        unsafe
+                        {
+                            float* pa = &alpha;
+                            IntPtr alpha_ptr = (IntPtr)pa;
+
+                            float* pb = &beta;
+                            IntPtr beta_ptr = (IntPtr)pb;
+
+                            _statusF32 = CudaBlasNativeMethods.cublasGemmEx(blas.Value.CublasHandle, transa, transb, m, n, k, alpha_ptr, aPtrSingle, cudaDataType.CUDA_R_32F, lda, bPtrSingle, cudaDataType.CUDA_R_32F, 
+                                ldb, beta_ptr, cPtrSingle, cudaDataType.CUDA_R_32F, ldc, ComputeType.Compute32FFast16F, GemmAlgo.DefaultTensorOp);
+                        }
+                    }
+
                     if (_statusF32 != CublasStatus.Success)
                     {
                         throw new CudaBlasException(_statusF32);
@@ -370,8 +392,25 @@ namespace TensorSharp.CUDA.MatrixMul
                     CUdeviceptr bPtrSingle = CudaHelpers.GetBufferStart(b);
                     CUdeviceptr cPtrSingle = CudaHelpers.GetBufferStart(c);
 
-                    CublasStatus _statusF32 = CudaBlasNativeMethods.cublasSgemmStridedBatched(blas.Value.CublasHandle,
-                        transa, transb, m, n, k, ref alpha, aPtrSingle, lda, stra, bPtrSingle, ldb, strb, ref beta, cPtrSingle, ldc, strc, batchSize);
+                    CublasStatus _statusF32 = CublasStatus.NotInitialized;
+                    if (EnableTensorCore == false)
+                    {
+                        _statusF32 = CudaBlasNativeMethods.cublasSgemmStridedBatched(blas.Value.CublasHandle, transa, transb, m, n, k, ref alpha, aPtrSingle, lda, stra, bPtrSingle, ldb, strb, ref beta, cPtrSingle, ldc, strc, batchSize);
+                    }
+                    else
+                    {
+                        unsafe
+                        {
+                            float* pa = &alpha;
+                            IntPtr alpha_ptr = (IntPtr)pa;
+
+                            float* pb = &beta;
+                            IntPtr beta_ptr = (IntPtr)pb;
+
+                            _statusF32 = CudaBlasNativeMethods.cublasGemmStridedBatchedEx(blas.Value.CublasHandle, transa, transb, m, n, k, alpha_ptr, aPtrSingle, cudaDataType.CUDA_R_32F, lda, stra, bPtrSingle, cudaDataType.CUDA_R_32F, ldb, strb, beta_ptr, cPtrSingle, cudaDataType.CUDA_R_32F, ldc, strc, batchSize, ComputeType.Compute32FFast16F, GemmAlgo.DefaultTensorOp);
+                        }
+                    }
+
                     if (_statusF32 != CublasStatus.Success)
                     {
                         throw new CudaBlasException(_statusF32);
