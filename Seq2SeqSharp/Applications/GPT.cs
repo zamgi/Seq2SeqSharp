@@ -26,13 +26,11 @@ namespace Seq2SeqSharp.Applications
     public class GPT : BaseSeq2SeqFramework<Seq2SeqModel>
     {
         // Trainable parameters including networks and tensors
-        private MultiProcessorNetworkWrapper<IWeightTensor> m_tgtEmbedding; //The embeddings over devices for source
-
-        private MultiProcessorNetworkWrapper<IDecoder> m_decoder; //The decoders over devices
-        private MultiProcessorNetworkWrapper<IFeedForwardLayer> m_decoderFFLayer; //The feed forward layers over devices after all layers in decoder
-
-        private MultiProcessorNetworkWrapper<IWeightTensor> m_posEmbedding;
-        private MultiProcessorNetworkWrapper<IWeightTensor> m_segmentEmbedding;
+        private MultiProcessorNetworkWrapper<IWeightTensor> m_tgtEmbedding = null; //The embeddings over devices for source
+        private MultiProcessorNetworkWrapper<IDecoder> m_decoder = null; //The decoders over devices
+        private MultiProcessorNetworkWrapper<IFeedForwardLayer> m_decoderFFLayer = null ; //The feed forward layers over devices after all layers in decoder
+        private MultiProcessorNetworkWrapper<IWeightTensor> m_posEmbedding = null;
+        private MultiProcessorNetworkWrapper<IWeightTensor> m_segmentEmbedding = null;
 
         private readonly ShuffleEnums m_shuffleType = ShuffleEnums.Random;
         readonly Seq2SeqOptions m_options = null;
@@ -63,7 +61,7 @@ namespace Seq2SeqSharp.Applications
                 }
 
                 // Model file exists, so we load it from file.
-                m_modelMetaData = LoadModel(CreateTrainableParameters);
+                m_modelMetaData = LoadModel();
             }
             else
             {
@@ -95,10 +93,34 @@ namespace Seq2SeqSharp.Applications
             SaveModel(createBackupPrevious: true, suffix: ".vq");
         }
 
-        protected override Seq2SeqModel LoadModelImpl() => base.LoadModelRoutine<Model_4_ProtoBufSerializer>(CreateTrainableParameters, Seq2SeqModel.Create);
+        protected override Seq2SeqModel LoadModel(string suffix = "") => base.LoadModelRoutine<Model_4_ProtoBufSerializer>(CreateTrainableParameters, Seq2SeqModel.Create, suffix);
 
         private bool CreateTrainableParameters(IModel model)
         {
+            if (m_decoder != null)
+            {
+                m_decoder.Dispose();
+            }
+            if (m_decoderFFLayer != null)
+            {
+                m_decoderFFLayer.Dispose();
+            }
+
+            if (m_posEmbedding != null)
+            {
+                m_posEmbedding.Dispose();
+            }
+
+            if (m_segmentEmbedding != null)
+            {
+                m_segmentEmbedding.Dispose();
+            }
+
+            if (m_tgtEmbedding != null)
+            {
+                m_tgtEmbedding.Dispose();
+            }
+
             Logger.WriteLine($"Creating encoders and decoders...");
             var raDeviceIds = new RoundArray<int>(DeviceIds);
 
