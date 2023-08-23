@@ -22,6 +22,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using ProtoBuf;
 
 namespace ManagedCuda.BasicTypes
 {
@@ -766,7 +767,7 @@ namespace ManagedCuda.BasicTypes
 		public struct half
 #pragma warning restore CS8981
 		{
-        ushort x;
+        public ushort x;
 
         /// <summary>
         /// 
@@ -790,6 +791,11 @@ namespace ManagedCuda.BasicTypes
         public half(half h16)
         {
             x = h16.x;
+        }
+
+        public half(ushort v)
+        {
+            x = v;
         }
 
         private static ushort __internal_float2half(float f, ref uint sign, ref uint remainder)
