@@ -36,8 +36,9 @@ namespace Seq2SeqSharp.Tools
 
         private TooLongSequence m_tooLongSequence = TooLongSequence.Ignore;
 
-        private string m_binaryDataSetFilePath = "";
+        private string m_indexedDataSetFilePath = "";
         private int m_batchNumInTotal = 0;
+        private int m_startBatchId = 0;
 
         public List<Dictionary<string, int>> CountTokenFreqs()
         {
@@ -248,8 +249,8 @@ namespace Seq2SeqSharp.Tools
                 (var length2offsets, var length2counts, string tmpDataSetFilePath) = BuildIndex();
                 Logger.WriteLine($"Start to sort and shuffle data set by length.");
 
-                m_binaryDataSetFilePath = tmpDataSetFilePath + ".sorted";
-                using (BinaryWriter bw = new BinaryWriter(new FileStream(m_binaryDataSetFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 40960000)))
+                m_indexedDataSetFilePath = tmpDataSetFilePath + ".sorted";
+                using (BinaryWriter bw = new BinaryWriter(new FileStream(m_indexedDataSetFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 40960000)))
                 using (MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(tmpDataSetFilePath))
                 using (MemoryMappedViewStream mms = mmf.CreateViewStream())
                 {
@@ -311,11 +312,19 @@ namespace Seq2SeqSharp.Tools
 
         public IEnumerator<T> GetEnumerator()
         {
-            PrepareDataSet();
+            if (String.IsNullOrEmpty(m_indexedDataSetFilePath) || File.Exists(m_indexedDataSetFilePath) == false)
+            {
+                PrepareDataSet();
+            }
+            else
+            {
+                Logger.WriteLine($"Use existing indexed data set '{m_indexedDataSetFilePath}'");
+            }
+
             int batchIdx = 0;
             int currentBatchPercent = 0;
 
-            using (MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(m_binaryDataSetFilePath))
+            using (MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(m_indexedDataSetFilePath))
             using (MemoryMappedViewStream mms = mmf.CreateViewStream())
             {
                 using (BinaryReader br = new BinaryReader(mms))
@@ -332,28 +341,52 @@ namespace Seq2SeqSharp.Tools
                         string[] tgtLines = br.ReadString().Split("\n");
                         batchIdx++;
 
+                        if (batchIdx < m_startBatchId)
+                        {
+                            continue;
+                        }
+
+                        T batch;
+                        int currentTokenCountsInBatch = 0;
                         for (int i = 0; i < sizeInBatch; i++)
                         {
                             var tgtLine = tgtLines[i];
 
-                            if ((100 * batchIdx / m_batchNumInTotal) > currentBatchPercent)
+                            if (m_batchNumInTotal > 0)
                             {
-                                Logger.WriteLine($"Processing batch '{batchIdx}/{m_batchNumInTotal}'."); // The '{i}th' record in this batch is: Target = '{tgtLine}'");
-                                currentBatchPercent++;
-                            }
+                                if ((100 * batchIdx / m_batchNumInTotal) > currentBatchPercent)
+                                {
+                                    Logger.WriteLine($"Processing batch '{batchIdx}/{m_batchNumInTotal}'."); // The '{i}th' record in this batch is: Target = '{tgtLine}'");
+                                    currentBatchPercent++;
+                                }
+                            }                            
 
                             SntPair sntPair = new SntPair(tgtLine, tgtLine);
+                            currentTokenCountsInBatch += sntPair.GetTgtTokenCount();
                             outputs.Add(sntPair);
+
+                            if (currentTokenCountsInBatch >= m_maxTokenSizePerBatch)
+                            {
+                                batch = new T();
+                                batch.CreateBatch(outputs);
+                                yield return batch;
+
+                                outputs = new List<SntPair>();
+                                currentTokenCountsInBatch = 0;
+                            }
                         }
 
-                        var batch = new T();
-                        batch.CreateBatch(outputs);
-                        yield return batch;
+                        if (outputs.Count > 0)
+                        {
+                            batch = new T();
+                            batch.CreateBatch(outputs);
+                            yield return batch;
+                        }
                     }
                 }
             }
 
-            File.Delete(m_binaryDataSetFilePath);
+            File.Delete(m_indexedDataSetFilePath);
         }
 
         IEnumerator IEnumerable.GetEnumerator()
@@ -366,7 +399,7 @@ namespace Seq2SeqSharp.Tools
 
         }
 
-        public MonoCorpus(string corpusFilePath, string tgtLangName, int maxTokenSizePerBatch, int maxTgtSentLength = 32, ShuffleEnums shuffleEnums = ShuffleEnums.Random, TooLongSequence tooLongSequence = TooLongSequence.Ignore)
+        public MonoCorpus(string corpusFilePath, string tgtLangName, int maxTokenSizePerBatch, int maxTgtSentLength = 32, ShuffleEnums shuffleEnums = ShuffleEnums.Random, TooLongSequence tooLongSequence = TooLongSequence.Ignore, string indexedFilePath = "", int startBatchId = 0)
         {
             Logger.WriteLine($"Loading mono corpus from '{corpusFilePath}' Files search pattern '*.{tgtLangName}.snt' MaxTgtSentLength = '{maxTgtSentLength}', aggregateLengthForShuffle = '{shuffleEnums}', TooLongSequence = '{tooLongSequence}'");
             m_maxTokenSizePerBatch = maxTokenSizePerBatch;
@@ -374,6 +407,8 @@ namespace Seq2SeqSharp.Tools
             m_tooLongSequence = tooLongSequence;
             m_shuffleEnums = shuffleEnums;
             CorpusName = corpusFilePath;
+            m_indexedDataSetFilePath = indexedFilePath;
+            m_startBatchId = startBatchId;
 
             m_tgtFileList = new List<string>();
             string[] files = Directory.GetFiles(corpusFilePath, $"*.{tgtLangName}.snt", SearchOption.TopDirectoryOnly);
