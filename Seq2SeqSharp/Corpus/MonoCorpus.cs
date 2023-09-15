@@ -346,6 +346,11 @@ namespace Seq2SeqSharp.Tools
                             continue;
                         }
 
+                        if (batchIdx % 10000 == 0)
+                        {
+                            Logger.WriteLine($"Processing batch '{batchIdx}'");
+                        }
+
                         T batch;
                         int currentTokenCountsInBatch = 0;
                         for (int i = 0; i < sizeInBatch; i++)
