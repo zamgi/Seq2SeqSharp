@@ -167,7 +167,6 @@ namespace Seq2SeqSharp.Models
         public void AddWeights(string name, float[] weights)
         {
             Logger.WriteLine($"Adding weights '{name}' to the model.");
-
             if (VQType == VQTypeEnums.FLOAT16)
             {             
                 var weightsHalf = new ushort[weights.Length];
