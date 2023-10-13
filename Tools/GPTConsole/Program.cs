@@ -22,7 +22,7 @@ using Seq2SeqSharp.Optimizer;
 using Seq2SeqSharp.Utils;
 using Seq2SeqSharp.Applications;
 
-namespace Seq2SeqConsole
+namespace GPTConsole
 {
     internal static class Program
     {
@@ -51,7 +51,7 @@ namespace Seq2SeqConsole
                 }
 
                 Logger.Verbose = opts.LogVerbose;
-                Logger.LogFile = $"{nameof(Seq2SeqConsole)}_{opts.Task}_{Utils.GetTimeStamp(DateTime.Now)}.log";
+                Logger.LogFile = $"{nameof(GPTConsole)}_{opts.Task}_{Utils.GetTimeStamp(DateTime.Now)}.log";
 
                 ShowOptions(args, opts);
 
@@ -64,7 +64,16 @@ namespace Seq2SeqConsole
                         maxTgtSentLength: opts.MaxTgtSentLength, shuffleEnums: opts.ShuffleType, tooLongSequence: opts.TooLongSequence, indexedFilePath: opts.IndexedCorpusPath, startBatchId: opts.StartBatchId);
 
                     // Create learning rate
-                    ILearningRate learningRate = new DecayLearningRate(opts.StartLearningRate, opts.WarmUpSteps, opts.WeightsUpdateCount, opts.LearningRateStepDownFactor, opts.UpdateNumToStepDownLearningRate);
+                    ILearningRate learningRate = null;
+
+                    if (opts.LearningRateType == LearningRateTypeEnums.CosineDecay)
+                    {
+                        learningRate = new CosineDecayLearningRate(opts.StartLearningRate, opts.WarmUpSteps, opts.LearningRateDecaySteps, opts.WeightsUpdateCount);
+                    }
+                    else
+                    {
+                        learningRate = new DecayLearningRate(opts.StartLearningRate, opts.WarmUpSteps, opts.WeightsUpdateCount, opts.LearningRateStepDownFactor, opts.UpdateNumToStepDownLearningRate);
+                    }
 
                     // Create optimizer
                     IOptimizer optimizer = Misc.CreateOptimizer(opts);
