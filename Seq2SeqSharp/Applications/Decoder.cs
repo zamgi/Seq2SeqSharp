@@ -17,6 +17,7 @@ using System;
 using System.Collections.Generic;
 using TensorSharp;
 using Seq2SeqSharp.Enums;
+using ProtoBuf;
 
 namespace Seq2SeqSharp.Applications
 {
@@ -268,7 +269,7 @@ namespace Seq2SeqSharp.Applications
             IWeightTensor tgtEmbedding, float[] srcOriginalLenghts, Vocab tgtVocab, PaddingEnums paddingType, float dropoutRatio, DecodingOptions decodingOptions, bool isTraining = true,
             bool outputSentScore = true, List<BeamSearchStatus> previousBeamSearchResults = null, IFeedForwardLayer pointerGenerator = null, List<List<int>> srcSeqs = null, Dictionary<string, IWeightTensor> cachedTensors = null,
             List<List<int>> alignmentsToSrc = null, List<List<float>> alignmentScoresToSrc = null, bool teacherForcedAlignment = false, LossEnums lossType = LossEnums.CrossEntropy, float focalLossGamma = 0.0f, float lossSmooth = 1e-9f, 
-            List<int> blockedTokens = null, IWeightTensor segmentEmbeddings = null, bool amp = false, IWeightTensor posEmbeddings = null)
+            List<int> blockedTokens = null, IWeightTensor segmentEmbeddings = null, bool amp = false, IWeightTensor posEmbeddings = null, float lossScaling = 0.0f)
         {
             int eosTokenId = tgtVocab.GetWordIndex(BuildInTokens.EOS, logUnk: true);
             int batchSize = tgtSeqs.Count;
@@ -390,12 +391,22 @@ namespace Seq2SeqSharp.Applications
             if (isTraining)
             {
                 var leftShiftTgtSeqs = g.LeftShiftTokens(tgtSeqs, eosTokenId);
-                var cost = lossType == LossEnums.CrossEntropy ? g.CrossEntropyLoss(probs, leftShiftTgtSeqs, smooth: lossSmooth, gamma: focalLossGamma) : g.NLLLoss(probs, leftShiftTgtSeqs);
+                var cost = lossType == LossEnums.CrossEntropy ? g.CrossEntropyLoss(probs, leftShiftTgtSeqs, smooth: lossSmooth, gamma: focalLossGamma, lossScaling: lossScaling) : g.NLLLoss(probs, leftShiftTgtSeqs);
 
                 return (cost, null);
             }
             else
             {
+                if (decodingOptions.BlockedTokens != null && decodingOptions.BlockedTokens.Count > 0)
+                {
+                    var btList = new List<List<int>>();
+                    btList.Add(decodingOptions.BlockedTokens);
+                    var blockTokensTensor = g.CreateTokensTensor(btList, elementType: DType.Float32); // [1, BlockedTokens.Count]
+                    blockTokensTensor = g.Scatter(blockTokensTensor, -1.0f, 1, false, shape: new long[] { 1, probs.Sizes[1] });
+                    blockTokensTensor = g.Expand(blockTokensTensor, dims: probs.Sizes);
+                    probs = g.Add(blockTokensTensor, probs);
+                }
+
                 // Transformer decoder with beam search at inference time
                 List<List<BeamSearchStatus>> bssSeqList = new List<List<BeamSearchStatus>>(); //shape: (beam_search_size, batch_size)
                 int beamSearchSize = decodingOptions.BeamSearchSize;
@@ -403,7 +414,7 @@ namespace Seq2SeqSharp.Applications
                 {
                     // Output "i"th target word
                     using var targetIdxTensor = (decodingOptions.DecodingStrategy == DecodingStrategyEnums.GreedySearch) ? g.Argmax(probs, 1) : 
-                                                g.TopPSample(probs, decodingOptions.TopP, decodingOptions.RepeatPenalty, decodingOptions.BlockedTokens, decodedSequences: tgtSeqs);
+                                                g.TopPSample(probs, decodingOptions.TopP, decodingOptions.RepeatPenalty, decodedSequences: tgtSeqs);
                     IWeightTensor gatherTensor = null;
                     if (outputSentScore)
                     {
@@ -479,7 +490,7 @@ namespace Seq2SeqSharp.Applications
             IWeightTensor tgtEmbedding, Vocab tgtVocab, PaddingEnums paddingType, float dropoutRatio, DecodingOptions decodingOptions, bool isTraining = true,
             bool outputSentScore = true, List<BeamSearchStatus> previousBeamSearchResults = null, Dictionary<string, IWeightTensor> cachedTensors = null,
             LossEnums lossType = LossEnums.CrossEntropy, float focalLossGamma = 0.0f, float lossSmooth = 1e-9f, List<int> blockedTokens = null, IWeightTensor segmentEmbeddings = null, bool amp = true,
-            IWeightTensor posEmbeddings = null)
+            IWeightTensor posEmbeddings = null, float lossScaling = 0.0f)
         {
             int eosTokenId = tgtVocab.GetWordIndex(BuildInTokens.EOS, logUnk: true);
             int batchSize = tgtSeqs.Count;
@@ -516,10 +527,8 @@ namespace Seq2SeqSharp.Applications
                     decOutputIdx[i] = tgtSeqLen * (i + 1) - 1;
                 }
 
-
                 var indice = g.CreateTensorWeights(new long[] { decOutputIdx.Length, 1 }, decOutputIdx);
                 decOutput = g.IndexSelect(decOutput, indice);
-                tgtSeqLen = 1;
             }
 
             IWeightTensor ffLayer = decoderFFLayer.Process(decOutput, batchSize, g);
@@ -542,12 +551,22 @@ namespace Seq2SeqSharp.Applications
             if (isTraining)
             {
                 var leftShiftTgtSeqs = g.LeftShiftTokens(tgtSeqs, eosTokenId);
-                var cost = lossType == LossEnums.CrossEntropy ? g.CrossEntropyLoss(probs, leftShiftTgtSeqs, graident:1.0f, smooth: lossSmooth, gamma: focalLossGamma) : g.NLLLoss(probs, leftShiftTgtSeqs);
+                var cost = lossType == LossEnums.CrossEntropy ? g.CrossEntropyLoss(probs, leftShiftTgtSeqs, graident:1.0f, smooth: lossSmooth, gamma: focalLossGamma, lossScaling: lossScaling) : g.NLLLoss(probs, leftShiftTgtSeqs);
 
                 return (cost, null);
             }
             else
             {
+                if (decodingOptions.BlockedTokens != null && decodingOptions.BlockedTokens.Count > 0)
+                {
+                    var btList = new List<List<int>>();
+                    btList.Add(decodingOptions.BlockedTokens);
+                    var blockTokensTensor = g.CreateTokensTensor(btList, elementType: DType.Float32); // [1, BlockedTokens.Count]
+                    blockTokensTensor = g.Scatter(blockTokensTensor, -1.0f, 1, false, shape: new long[] { 1, probs.Sizes[1] });
+                    blockTokensTensor = g.Expand(blockTokensTensor, dims: probs.Sizes);
+                    probs = g.Add(blockTokensTensor, probs);
+                }
+
                 // Transformer decoder with beam search at inference time
                 List<List<BeamSearchStatus>> bssSeqList = new List<List<BeamSearchStatus>>(); //shape: (beam_search_size, batch_size)
                 int beamSearchSize = decodingOptions.BeamSearchSize;
@@ -555,7 +574,7 @@ namespace Seq2SeqSharp.Applications
                 {
                     // Output "i"th target word
                     using var targetIdxTensor = (decodingOptions.DecodingStrategy == DecodingStrategyEnums.GreedySearch) ? g.Argmax(probs, 1) :
-                                                g.TopPSample(probs, decodingOptions.TopP, decodingOptions.RepeatPenalty, decodingOptions.BlockedTokens, decodedSequences: tgtSeqs);
+                                                g.TopPSample(probs, decodingOptions.TopP, decodingOptions.RepeatPenalty, decodedSequences: tgtSeqs);
                     IWeightTensor gatherTensor = null;
                     if (outputSentScore)
                     {
