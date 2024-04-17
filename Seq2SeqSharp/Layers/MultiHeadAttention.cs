@@ -159,9 +159,23 @@ namespace Seq2SeqSharp
 
             IWeightTensor Vs = g.View(g.AsContiguous(g.Transpose(allV, 1, 2)), dims: new long[] { batchSize * m_multiHeadNum, seqLenQ, m_d });
 
-            // Scaled softmax
+            // Scaled masked softmax
             float scale = 1.0f / (float)(Math.Sqrt(m_d));
+
+            // Convert tensors to Float32 type if they are not that type.
+            bool useF16 = (Qs.ElementType == DType.Float16);
+            if (useF16)
+            {
+                Qs = g.Half2Float(Qs);
+                Ks = g.Half2Float(Ks);
+            }
             var attn = g.MulBatch(Qs, Ks, scale); // Shape: [batchSize * m_multiHeadNum, relPosSize, seqLenQ]
+
+            // Convert it back to Float16 for the following parts
+            if (useF16)
+            {
+                attn = g.Float2Half(attn);
+            }
 
             // Add mask
             attn = g.View(attn, dims: new long[] { batchSize, m_multiHeadNum, newTokensIdx, seqLenQ });
@@ -171,15 +185,16 @@ namespace Seq2SeqSharp
                 {
                     keyMask = g.Peek(keyMask, 2, seqLenQ - newTokensIdx, newTokensIdx);
                 }
-
+                //if (useF16)
+                //{
+                //    keyMask = g.Half2Float(keyMask);
+                //}
                 attn = g.Add(attn, keyMask, inPlace: true);
             }
 
-            var attnProbs = g.Softmax(attn, inPlace: true);
-
-            attnProbs = g.View(attnProbs, dims: new long[] { batchSize * m_multiHeadNum, newTokensIdx, seqLenQ });
-
-            IWeightTensor o = g.View(g.MulBatch(attnProbs, Vs), dims: new long[] { batchSize, m_multiHeadNum, newTokensIdx, m_d });
+            attn = g.Softmax(attn, inPlace: true);
+            attn = g.View(attn, dims: new long[] { batchSize * m_multiHeadNum, newTokensIdx, seqLenQ });
+            IWeightTensor o = g.View(g.MulBatch(attn, Vs), dims: new long[] { batchSize, m_multiHeadNum, newTokensIdx, m_d });
             IWeightTensor W = g.View(g.AsContiguous(g.Transpose(o, 1, 2)), dims: new long[] { batchSize * newTokensIdx, m_multiHeadNum * m_d });
 
             // Output projection
