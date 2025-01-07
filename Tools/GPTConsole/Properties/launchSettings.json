@@ -2,8 +2,8 @@
   "profiles": {
     "GPTConsole": {
       "commandName": "Project",
-      "commandLineArgs": "-Task VQModel -ModelFilePath ybook_2b.model -VQType FLOAT16 -ProcessorType CPU",
-      "workingDirectory": "C:\\Works\\ReleasePackage\\models\\writing"
+      "commandLineArgs": "-Task Test -ModelFilePath ybook_chat_3b.model.172000 -InputTestFile test_spm.txt -OutputFile a.out -ProcessorType GPU -MaxSrcSentLength 1024 -MaxTgtSentLength 64",
+      "workingDirectory": "C:\\Works\\Workspace\\YbookChat"
     }
   }
 }

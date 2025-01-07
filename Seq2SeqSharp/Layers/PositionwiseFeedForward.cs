@@ -21,8 +21,10 @@ namespace Seq2SeqSharp
     internal class PositionwiseFeedForward : IFeedForwardLayer
     {
         private readonly INormalization layerNorm2;
-        private readonly FeedForwardLayer feedForwardLayer1;
-        private readonly FeedForwardLayer feedForwardLayer2;
+        private readonly FeedForwardLayer feedForwardLayer1 = null;
+        private readonly FeedForwardLayer feedForwardLayer2 = null;
+
+        private readonly FeedForwardLayer feedForwardLayer3 = null;
 
         private readonly string m_name;
         private readonly float m_dropoutRatio;
@@ -50,6 +52,12 @@ namespace Seq2SeqSharp
 
             feedForwardLayer1 = new FeedForwardLayer($"{name}.{nameof(feedForwardLayer1)}", hiddenDim, intermediateDim, m_dropoutRatio, deviceId, isTrainable, learningRateFactor: learningRateFactor, elementType: elementType);
             feedForwardLayer2 = new FeedForwardLayer($"{name}.{nameof(feedForwardLayer2)}", intermediateDim, hiddenDim, m_dropoutRatio, deviceId, isTrainable, learningRateFactor: learningRateFactor, elementType: elementType);
+
+            if (m_activateFunc == ActivateFuncEnums.SwiGLU)
+            {
+                feedForwardLayer3 = new FeedForwardLayer($"{name}.{nameof(feedForwardLayer3)}", hiddenDim, intermediateDim, m_dropoutRatio, deviceId, isTrainable, learningRateFactor: learningRateFactor, elementType: elementType);
+            }
+
         }
 
 
@@ -66,33 +74,6 @@ namespace Seq2SeqSharp
             string keyName = $"{m_name}_PositionwiseFeedForward";
             using var g = graph.CreateSubGraph(keyName);
 
-            int seqLen = (int)(input.Sizes[0] / batchSize);
-
-
-            IWeightTensor m_cacheT = null;
-            string cacheKeyName = keyName + "_" + nameof(input);
-            int newTokensIdx = seqLen;
-            if (cachedTensors != null)
-            {
-                if (cachedTensors.ContainsKey(cacheKeyName) == true)
-                {
-                    m_cacheT = cachedTensors[cacheKeyName];
-                    newTokensIdx = seqLen - (int)m_cacheT.Sizes[0];
-                }
-                else
-                {
-                    cachedTensors.Add(cacheKeyName, null);
-                }
-
-
-                // Optimize runtime for test that only processing new tokens
-                input = g.View(input, dims: new long[] { batchSize, seqLen, -1 });
-
-                input = g.AsContiguous(g.Peek(input, 1, seqLen - newTokensIdx, newTokensIdx)); // Shape: [batchSize, newTokenIdx, input_dim]
-                input = g.View(input, dims: new long[] { batchSize * newTokensIdx, -1 }); // Shape: [batchSize * newTokenIdx, input_dim]
-                                                                                        
-            }
-
             var inputNorm = layerNorm2.Norm(input, g);
 
             //Feed forward
@@ -100,31 +81,18 @@ namespace Seq2SeqSharp
             // Activate function
             var actFFNResult = RunActivateFunction(g, ffnResult);
 
+
+            if (m_activateFunc == ActivateFuncEnums.SwiGLU)
+            {
+                var ffnResult2 = feedForwardLayer3.Process(inputNorm, batchSize, g);
+                actFFNResult = g.EltMul(actFFNResult, ffnResult2);
+            }
+
             var ffn2Result = feedForwardLayer2.Process(actFFNResult, batchSize, g); // Shape: [batchSize * newTokenIdx, input_dim]
 
             //Skip connection and layer normaliztion
             var addFFNResult = graph.Add(ffn2Result, input, inPlace: true); // Shape: [batchSize * newTokenIdx, input_dim]
 
-            if (cachedTensors != null)
-            {
-                addFFNResult = g.View(addFFNResult, dims: new long[] {batchSize, newTokensIdx, -1 }); // Shape: [batchSize, newTokenIdx, input_dim]
-                addFFNResult = g.Transpose(addFFNResult, 0, 1); // Shape: [newTokenIdx, batchSize, input_dim]
-
-                if (m_cacheT == null)
-                {
-                    m_cacheT = addFFNResult;// Shape: [newTokenIdx, batchSize, input_dim]
-                }
-                else
-                {
-                    m_cacheT = g.Concate(0, m_cacheT, addFFNResult); // Shape: [seqLen, batchSize, input_dim]
-                }
-                m_cacheT.UnbindFromComputeGraph();
-
-                cachedTensors[cacheKeyName] = m_cacheT;
-
-                addFFNResult = g.AsContiguous(g.Transpose(m_cacheT, 0, 1)); // Shape: [batchSize, seqLen, input_dim]
-                addFFNResult = graph.View(addFFNResult, dims: new long[] { batchSize * seqLen, -1 });
-            }
             return addFFNResult;
 
         }
@@ -156,6 +124,11 @@ namespace Seq2SeqSharp
             response.AddRange(feedForwardLayer1.GetParams());
             response.AddRange(feedForwardLayer2.GetParams());
 
+            if (feedForwardLayer3 != null)
+            {
+                response.AddRange(feedForwardLayer3.GetParams());
+            }
+
             return response;
         }
 
@@ -165,6 +138,11 @@ namespace Seq2SeqSharp
             layerNorm2.Save(stream);
             feedForwardLayer1.Save(stream);
             feedForwardLayer2.Save(stream);
+
+            if (feedForwardLayer3 != null)
+            {
+                feedForwardLayer3.Save(stream);
+            }
         }
 
 
@@ -173,6 +151,11 @@ namespace Seq2SeqSharp
             layerNorm2.Load(stream);
             feedForwardLayer1.Load(stream);
             feedForwardLayer2.Load(stream);
+
+            if (feedForwardLayer3 != null)
+            {
+                feedForwardLayer3.Load(stream);
+            }
         }
 
         public INeuralUnit CloneToDeviceAt(int deviceId)

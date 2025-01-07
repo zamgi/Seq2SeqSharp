@@ -107,9 +107,9 @@ namespace Seq2SeqSharp.Applications
         [Arg("Encoder type: None, LSTM, BiLSTM, Transformer", nameof(EncoderType))]
         public EncoderTypeEnums EncoderType = EncoderTypeEnums.Transformer;
 
-        [Arg("The gamma value of focal loss. Default is 0.0f", nameof(FocalLossGamma))]
-        [Range(0.0f, 5.0f)]
-        public float FocalLossGamma = 0.0f;
+        [Arg("Label Smoothing. Default is 0.1f", nameof(LabelSmooth))]
+        [Range(0.0f, 1.0f)]
+        public float LabelSmooth = 0.1f;
 
         [Arg("The smooth value of loss. Default is 1e-9f", nameof(LossSmooth))]
         [Range(1e-12f, 1.0f)]
@@ -183,8 +183,8 @@ namespace Seq2SeqSharp.Applications
         [Arg("The vocabulary file path for source side.", nameof(SrcVocab))]
         public string SrcVocab = null;
 
-        [Arg("Mode to save GPU memory. Default is false", nameof(SaveGPUMemoryMode))]
-        public bool SaveGPUMemoryMode = false;
+        [Arg("The level for GPU memory saving mode. 0 is disable, > 0 is enabled. Higher level more GPU memory saved, but training will be slow.", nameof(SaveGPUMemoryLevel))]
+        public int SaveGPUMemoryLevel = 0;
 
         [Arg("Starting Learning rate", nameof(StartLearningRate))]
         [Range(0.000000001f, 1.0f)]
@@ -201,6 +201,10 @@ namespace Seq2SeqSharp.Applications
         [Arg("The type of token paddings. It could be NoPaddingInSrc, NoPaddingInTgt, NoPadding and AllowPadding. The default value is NoPadding", nameof(PaddingType))]
         [RegularExpression("NoPaddingInSrc|NoPaddingInTgt|NoPadding|AllowPadding")]
         public PaddingEnums PaddingType = PaddingEnums.NoPadding;
+
+        [Arg("The alignment factor when padding sequences. The default value 0 (No alignment)", nameof(PaddingAlignmentFactor))]
+        [Range(0, 128)]
+        public int PaddingAlignmentFactor = 0;
 
         [Arg("Task to execute. It supports Train, Valid, Test, DumpVocab, UpdateVocab and Help", nameof(Task))]
         [RegularExpression("Train|Valid|Test|Alignment|DumpVocab|UpdateVocab|VQModel|Help")]
@@ -233,6 +237,9 @@ namespace Seq2SeqSharp.Applications
         [Arg("The batch id that the tool will start to process. The default value is 0", nameof(StartBatchId))]
         [Range(0, 9999999)]
         public int StartBatchId = 0;
+
+        [Arg("Zip password for dataset. The defulat value is empty", nameof(DataPassword))]
+        public string DataPassword = "";
 
         [Arg("The max degress of parallelism in task. Default is 1", nameof(TaskParallelism))]
         [Range(1, 999)]
@@ -303,6 +310,9 @@ namespace Seq2SeqSharp.Applications
         [Range(-1, 9999999)]
         public int RandomSeed = -1;
 
+        [Arg("Use KV Cache in test mode. The default value is true", nameof(UseKVCache))]
+        public bool UseKVCache = true;
+
         [Arg("Initial loss Scaling when AMP is enabled. Default is 1 which is disabled.", nameof(InitLossScaling))]
         [Range(1, 65000)]
         public float InitLossScaling = 1.0f;
@@ -311,9 +321,22 @@ namespace Seq2SeqSharp.Applications
         [RegularExpression("APE|NoPE|RoPE")]
         public PositionEmbeddingEnums PEType = PositionEmbeddingEnums.APE;
 
+        [Arg("The type of attention layer. It supports Classic and FlashAttentionV2", nameof(AttentionType))]
+        [RegularExpression("Classic|FlashAttentionV2")]
+        public AttentionTypeEnums AttentionType = AttentionTypeEnums.Classic;
+
+
+        [Arg("The type of multi-head attention type. It supports MHA and GQA. Default is MHA", nameof(MultiHeadAttentionTypeEnums))]
+        [RegularExpression("MHA|GQA")]
+        public MultiHeadAttentionTypeEnums MultiHeadAttentionType = MultiHeadAttentionTypeEnums.MHA;
+
+        [Arg("The number of KV Group when using GQA", nameof(KVGroupNum))]
+        [Range(0, 1024)]
+        public int KVGroupNum = 0;
+
         [Arg("The type of normalization. It supports LayerNorm and RMSNorm", nameof(NormType))]
         [RegularExpression("LayerNorm|RMSNorm")]
-        public NormEnums NormType = NormEnums.LayerNorm;
+        public NormEnums NormType = NormEnums.RMSNorm;
 
         [Arg("Log destination. Supported Values: None = 0, Console = 1, LogFile = 2, Callback = 4, and These values can be combined. For example: Value 3 means the log will be outputted to both Console and LogFile", nameof(LogDestination))]
         public Logger.Destination LogDestination = (Logger.Destination.Console | Logger.Destination.Logfile);
@@ -321,9 +344,9 @@ namespace Seq2SeqSharp.Applications
         [Arg("The level of logs to be printed out. Supported Values: none = 0, err = 1, warn = 2, info = 4 and debug = 8. These values can be combined. For example: Value 15 means err, warn, info and debug will be outputted.", nameof(LogLevel))]
         public Logger.Level LogLevel = (Logger.Level.err | Logger.Level.warn | Logger.Level.info | Logger.Level.debug);
 
-
         [Arg("It indicates if checking tensor corrupted is enabled. Default is disabled.", nameof(CheckTensorCorrupted))]
-        public bool CheckTensorCorrupted = false;
+        public bool CheckTensorCorrupted = false;        
+
         public void ValidateOptions()
         {
             if (AMP == true && ProcessorType != ProcessorTypeEnums.GPU)
@@ -340,6 +363,11 @@ namespace Seq2SeqSharp.Applications
             if (Task != ModeEnums.Train && !File.Exists(ModelFilePath))
             {
                 throw new FileNotFoundException($"Model '{ModelFilePath}' doesn't exist for task '{Task}'");
+            }
+
+            if (AttentionType == AttentionTypeEnums.FlashAttentionV2 && ProcessorType != ProcessorTypeEnums.GPU)
+            {
+                throw new ArgumentException("FlashAttentionV2 runs on GPU only, please use the classic attention layer instead.");
             }
         }
     }

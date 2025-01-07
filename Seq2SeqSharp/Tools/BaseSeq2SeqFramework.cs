@@ -136,18 +136,19 @@ namespace Seq2SeqSharp.Tools
         string m_compilerOptions = null;
         string m_mklInstructions = "AVX2";
         bool m_enableTensorCore = true;
-        bool m_saveGPUMemoryMode = false;
+        int m_saveGPUMemoryLevel = 0;
         CudaMemoryDeviceAllocatorType m_cudaMemoryAllocatorType = CudaMemoryDeviceAllocatorType.CudaMemoryPool;
         DType m_elementType = DType.Float32;
         float m_initLossScaling = 1.0f;
         bool m_autoCheckTensorCorruption = false;
+        AttentionTypeEnums m_attentionType = AttentionTypeEnums.Classic;
 
         public float LossScaling = 1.0f;
 
         public BaseSeq2SeqFramework(string deviceIds, ProcessorTypeEnums processorType, string modelFilePath, float memoryUsageRatio = 0.9f, 
             string compilerOptions = null, int runValidEveryUpdates = 10000, int primaryTaskId = 0, int updateFreq = 1, int startToRunValidAfterUpdates = 0,
             int maxDegressOfParallelism = 1, string mklInstructions = "AVX2", int weightsUpdateCount = 0, bool enableTensorCore = true, CudaMemoryDeviceAllocatorType cudaMemoryAllocatorType = CudaMemoryDeviceAllocatorType.CudaMemoryPool, 
-            DType elementType = DType.Float32, int randomSeed = -1, int saveModelEveryUpdats = 10000, bool saveGPUMemoryMode = false, float initLossScaling = 1.0f, bool autoCheckTensorCorruption = false)
+            DType elementType = DType.Float32, int randomSeed = -1, int saveModelEveryUpdats = 10000, int saveGPUMemoryLevel = 0, float initLossScaling = 1.0f, bool autoCheckTensorCorruption = false, AttentionTypeEnums attentionType = AttentionTypeEnums.Classic)
         {
             m_deviceIds = deviceIds.Split(',').Select(x => int.Parse(x)).ToArray();
             m_compilerOptions = compilerOptions;
@@ -165,9 +166,10 @@ namespace Seq2SeqSharp.Tools
             m_maxDegressOfParallelism = maxDegressOfParallelism;
             m_weightsUpdateCount = weightsUpdateCount;
             m_saveModelEveryUpdates = saveModelEveryUpdats;
-            m_saveGPUMemoryMode = saveGPUMemoryMode;
+            m_saveGPUMemoryLevel = saveGPUMemoryLevel;
             m_initLossScaling = initLossScaling;
             m_autoCheckTensorCorruption = autoCheckTensorCorruption;
+            m_attentionType = attentionType;
 
             InitDevices();
 
@@ -181,7 +183,7 @@ namespace Seq2SeqSharp.Tools
         public void InitDevices()
         {
             string[] cudaCompilerOptions = m_compilerOptions.IsNullOrEmpty() ? null : Regex.Split(m_compilerOptions, "--").ToList().Where(item => item != "").Select(item => "--" + item).ToArray();
-            TensorAllocator.InitDevices(m_processorType, m_deviceIds, m_memoryUsageRatio, cudaCompilerOptions, mklInstructions: m_mklInstructions, enableTensorCore: m_enableTensorCore, m_cudaMemoryAllocatorType, m_elementType);
+            TensorAllocator.InitDevices(m_processorType, m_deviceIds, m_memoryUsageRatio, cudaCompilerOptions, mklInstructions: m_mklInstructions, enableTensorCore: m_enableTensorCore, m_cudaMemoryAllocatorType, m_elementType, attentionTypeEnums: m_attentionType);
         }
 
         public virtual List<NetworkResult> RunForwardOnSingleDevice(IComputeGraph computeGraph, IPairBatch sntPairBatch, DecodingOptions decodingOptions, bool isTraining)
@@ -195,7 +197,7 @@ namespace Seq2SeqSharp.Tools
             }
 
             // Create computing graph instance and return it
-            return new ComputeGraphTensor(new WeightTensorFactory(), DeviceIds[deviceIdIdx], needBack, saveGPUMemoryMode: m_saveGPUMemoryMode, autoCheckCorruption: m_autoCheckTensorCorruption);
+            return new ComputeGraphTensor(new WeightTensorFactory(), DeviceIds[deviceIdIdx], needBack, saveGPUMemoryLevel: m_saveGPUMemoryLevel, autoCheckCorruption: m_autoCheckTensorCorruption);
         }
       
         public bool SaveModel(bool createBackupPrevious = false, string suffix = "") => SaveModelImpl(m_modelMetaData, createBackupPrevious, suffix);
@@ -499,7 +501,10 @@ namespace Seq2SeqSharp.Tools
                             if (IsGradientsCorrupted())
                             {
                                 Logger.WriteLine(Logger.Level.warn, $"Gradients is corrupted, so we reduce loss scaling from {LossScaling} to {LossScaling / 2.0f} and skip current batch.");
-                                LossScaling = LossScaling * 0.5f;
+                                if (m_initLossScaling != 1.0f)
+                                {
+                                    LossScaling = LossScaling * 0.5f;
+                                }
                                 contiSuccUpdate = 0;
                                 break;
                             }
@@ -516,7 +521,7 @@ namespace Seq2SeqSharp.Tools
 
                             m_weightsUpdateCount++;
 
-                            float gradNormFactor = Math.Max(sWordCnt, tWordCnt);
+                            float gradNormFactor = 1.0f / (float)Math.Max(sWordCnt, tWordCnt);
                             if (LossScaling > 0.0f)
                             {
                                 gradNormFactor = gradNormFactor / LossScaling;
@@ -526,11 +531,10 @@ namespace Seq2SeqSharp.Tools
                             contiSuccUpdate++;
                             if (contiSuccUpdate >= 2000)
                             {
-                                if (LossScaling * 2.0f < 32000.0f)
+                                if (m_initLossScaling != 1.0f)
                                 {
                                     LossScaling = LossScaling * 2.0f;
                                 }
-
                                 contiSuccUpdate = 0;
                             }
 

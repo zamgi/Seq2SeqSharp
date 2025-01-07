@@ -20,6 +20,592 @@ namespace TensorSharp.CUDA.DeviceCode
     [Precompile]
     internal class AdvFuncKernels : CudaCode
     {
+        private static readonly string CodeFlashAttention = @"
+#include <cuda_fp16.h>
+extern ""C""
+{
+__global__
+void flash_attention_2_forward_kernel(
+    const float* Q,
+    const float* K,
+    const float* V,
+    const int N,
+    const int d,
+    const int Tc,
+    const int Tr,
+    const int Bc,
+    const int Br,
+    const float softmax_scale,
+    const int q_start_offset,
+    float* L,
+    float* O
+) {
+    const float INFINITY = 9999999999.9f; 
+    int tx = threadIdx.x;
+    int txd = tx * d;
+
+    int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
+    int bz = blockIdx.z; // Tr index
+
+    // Offset into Q,K,V,O - different for each batch and head
+    int qkv_offset = (bx * gridDim.y * N * d) + (by * N * d);  // gridDim.y = nh
+    int lm_offset = (bx * gridDim.y * N) + (by * N);  // offset for L
+
+    // Define SRAM for Q,K,V,S
+    extern __shared__ float sramb[];
+    __half *sram = (__half *)sramb;
+
+    int tile_size = Bc * d;  // size of Qi, Kj, Vj
+    __half* Qi = sram;
+    __half* KVj = &sram[tile_size];
+
+    int i = bz;
+    if (i >= q_start_offset && i < Tr)
+    {       
+        if (i * Br + tx >= N)
+            return;  // break if we are done with the sequence
+
+        // Load Qi from HBM to SRAM, l and m to registers
+
+        for (int x = 0; x < d; x++) {
+            Qi[txd + x] = __float2half(Q[qkv_offset + (tile_size * i) + txd + x]);
+        }
+        float row_m_prev = -INFINITY;
+        float row_l_prev = 0;
+        float lS[256];
+
+        // Causal mask: j <= i
+        for (int j = 0; j <= i; ++j) {
+            __syncthreads();
+            // Load Kj, Vj from HBM to SRAM
+
+            for (int x = 0; x < d; x++) {
+                KVj[txd + x] = __float2half(K[qkv_offset + (tile_size * j) + txd + x]);
+            }
+            
+            __syncthreads();
+
+            int yMax = min(min(Bc, N - j * Bc), i * Br - j * Bc + tx + 1);         
+
+            // S_i^j = softmax_scale * QiKj^T
+            // S_i^j[tx][y] = softmax_scale * Sum_{x = 0}^{d-1} Qi[tx][x] * Kj[y][x]
+            float row_m = -INFINITY;
+
+            for (int y = 0; y < yMax; y++) {
+                //if (j * Bc + y >= N)
+                //    break;  // break if we are done with the sequence
+                //if (i * Br + tx < j * Bc + y)
+                //    break;
+                float sum = 0;
+
+                    for (int x = 0; x < d; x++)
+                        sum += __half2float(__hmul(Qi[txd + x], KVj[(y * d) + x]));
+                 
+                sum *= softmax_scale;
+                lS[y] = sum;
+
+                if (sum > row_m)
+                    row_m = sum;
+            }
+
+            // m_i^j = max(m_i^j-1, row_max(S_i^j))
+            float new_row_m = max(row_m_prev, row_m);
+
+            // P_i^j = exp(S_i^j - m_i^j)
+            // P_i^j[tx][y] = exp(S_i^j[tx][y] - m_i^j)
+            float row_l = 0;
+            for (int y = 0; y < yMax; y++) {
+                //if (j * Bc + y >= N)
+                //    break;  // break if we are done with the sequence
+                //if (i * Br + tx < j * Bc + y)
+                //    break;
+
+                float r = __expf(lS[y] - new_row_m);
+                lS[y] = r;
+                row_l += r;
+            }
+
+            __syncthreads();
+            for (int x = 0; x < d; x++) {
+                KVj[txd + x] = __float2half(V[qkv_offset + (tile_size * j) + txd + x]);
+            }
+            __syncthreads();
+
+            // l_i^j = (exp(m_i^j-1 - m_i^j) * l_i^j-1) + row_sum(P_i^j)
+            float row_m_exp = __expf(row_m_prev - new_row_m);
+            float new_row_l = (row_m_exp * row_l_prev) + row_l;
+
+            // O_i^j = diag(exp(m_i^j-1 - m_i^j))^-1 * O_i^j-1 + P_i^jVj
+            for (int x = 0; x < d; x++) {
+                float pv = 0;  // Pij * Vj
+                for (int y = 0; y < yMax; y++) {
+                    //if (j * Bc + y >= N)
+                    //    break;  // break if we are done with the sequence
+                    //if (i * Br + tx < j * Bc + y)
+                    //    break;
+                    pv += lS[y] * __half2float(KVj[(y * d) + x]);
+                }
+                O[qkv_offset + (tile_size * i) + txd + x] = \
+                    row_m_exp * O[qkv_offset + (tile_size * i) + txd + x] + pv;
+            }
+
+            // Update m and l
+            row_m_prev = new_row_m;
+            row_l_prev = new_row_l;
+        }
+
+        // O_i = diag(l_i^{Tc})^-1 * O_i^{Tc}
+        for (int x = 0; x < d; x++)
+            O[qkv_offset + (tile_size * i) + txd + x] /= row_l_prev;
+        // L_i = m_i^{Tc} + log(l_i^{Tc})
+        L[lm_offset + (Br * i) + tx] = row_m_prev + __logf(row_l_prev);
+    }
+}
+
+__global__
+void flash_attention_2_backward_kernel(
+    const float* Q,
+    const float* K,
+    const float* V,
+    const float* O,
+    const float* dO,
+    const float* L,
+    const int N,
+    const int d,
+    const int Tc,
+    const int Tr,
+    const int Bc,
+    const int Br,
+    const float softmax_scale,
+    float* dQ,
+    float* dK,
+    float* dV,
+    float* Stmp
+) {
+    const float INFINITY = 9999999999.9f; 
+    int tx = threadIdx.x;
+    int txd = tx * d;
+    int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
+    int bz = blockIdx.z; // Tc index;
+
+    // Offset into Q,K,V,O - different for each batch and head
+    int qkv_offset = (bx * gridDim.y * N * d) + (by * N * d);  // gridDim.y = nh
+    int lm_offset = (bx * gridDim.y * N) + (by * N);  // offset for L
+
+    // Define SRAM for Q,K,V,S
+    extern __shared__ float sramb[];
+    __half* sram = (__half*)sramb;
+
+    int col_tile_size = Bc * d;  // size of Kj, Vj
+    int row_tile_size = Br * d;  // size of Qi
+    __half* Kj = sram;
+    __half* Vj = &sram[col_tile_size];
+
+    __half* Qi = &sram[col_tile_size * 2];
+    __half* dOi = &sram[col_tile_size * 2 + row_tile_size];
+
+    // We also use S for P. Likewise, we use dS for dP.
+    // We can reuse the same memory because we don't need S and P at the same time.
+    // We also don't need dS and dP at the same time.
+    //__half* S = &sram[col_tile_size * 2 + row_tile_size * 2];
+
+    int stmp_offset = (bx * gridDim.y * Br * Br) + (by * Br * Br);  // gridDim.y = nh
+    float* S = &Stmp[stmp_offset];
+
+     int j = bz;
+     if (j < Tc) {
+
+        // Load Kj, Vj to SRAM
+        for (int x = 0; x < d; x++) {
+            Kj[txd + x] = __float2half(K[qkv_offset + (col_tile_size * j) + txd + x]);
+            Vj[txd + x] = __float2half(V[qkv_offset + (col_tile_size * j) + txd + x]);
+        }
+
+        for (int i = j; i < Tr; i++)  {
+            __syncthreads();
+            // Load Qi, Oi, dOi, dQi, li, mi to SRAM
+            // Also load l, m to registers
+            float Di = 0;
+
+                for (int x = 0; x < d; x++) {
+                    Qi[txd + x] = __float2half(Q[qkv_offset + (row_tile_size * i) + txd + x]);
+                    float dO_v = dO[qkv_offset + (row_tile_size * i) + txd + x];
+                    dOi[txd + x] = __float2half(dO_v);
+                    Di += dO_v * O[qkv_offset + (row_tile_size * i) + txd + x];
+                }
+            
+
+            float l_curr = L[lm_offset + (Br * i) + tx];
+
+            // Sij = softmax_scale * QiKj^T
+            // Sij[tx][y] = softmax_scale * Sum_{y = 0}^{Bc-1} Qi[tx][x] * Kj[y][x]
+
+            // Pij = diag(li)^-1 * exp(Sij - mi)
+            // Pij[tx][y] = (1 / li[tx]) * exp(Sij[tx][y] - mi[tx])
+
+            for (int y = 0; y < Bc; y++) {
+                float sum = 0;
+
+                    for (int x = 0; x < d; x++) {
+                        sum += __half2float(__hmul(Qi[txd + x], Kj[(y * d) + x]));
+                    }
+                
+                sum *= softmax_scale;
+                if (i * Br + tx < j * Bc + y)
+                    S[(Bc * tx) + y] = 0;
+                else
+                    S[(Bc * tx) + y] = __expf(sum - l_curr);
+            }
+
+            __syncthreads();
+            // dVj <- dVj + Pij^T * dOi
+            // dVj[tx][x] = dVj[tx][x] + Sum_{y = 0}^{Br-1} Pij[y][tx] * dOi[tx][x]
+            for (int x = 0; x < d; x++) {
+                float sum = 0;
+                float dOi_x = __half2float(dOi[txd + x]);              
+
+                    for (int y = 0; y < Br; y++) {
+                        sum += S[(Bc * y) + tx] * dOi_x;
+                    }
+                
+
+                atomicAdd(&dV[qkv_offset + (row_tile_size * j) + txd + x], sum);
+            }
+
+            // dPij <- dOi * Vj^T
+            // dPij[tx][y] = Sum_{x = 0}^{d-1} dOi[tx][x] * Vj[y][x]
+
+            // dSij <- Pij * (dPij - Di)
+            // dSij[tx][y] = Pij[tx][y] * (dPij[tx][y] - Di[tx])
+            for (int y = 0; y < Bc; y++) {
+                float sum = 0;
+
+
+                    for (int x = 0; x < d; x++) {
+                        sum += __half2float(__hmul(dOi[txd + x], Vj[(y * d) + x]));
+                    }
+                
+
+                S[(Bc * tx) + y] = S[(Bc * tx) + y] * (sum - Di);
+            }
+
+            // dQi <- dQi + softmax_scale * dSijKj
+            // dQ[tx][x] = dQ[tx][x] + softmax_scale * Sum_{y = 0}^{Bc-1} dSij[tx][y] * Kj[y][x]
+            for (int x = 0; x < d; x++) {
+                float sum = 0;
+
+                for (int y = 0; y < Bc; y++) {
+                    sum += S[(Bc * tx) + y] * __half2float(Kj[(y * d) + x]);
+                }
+                sum *= softmax_scale;
+                atomicAdd(&dQ[qkv_offset + (row_tile_size * i) + txd + x], sum);
+            }
+            __syncthreads();
+            // dKj <- dKj + softmax_scale * dSij^TQi
+            // dKj[tx][x] = dKj[tx][x] + softmax_scale * Sum_{y = 0}^{Br-1} dSij[y][tx] * Qi[y][x]
+            for (int x = 0; x < d; x++) {
+                float sum = 0;
+                for (int y = 0; y < Br; y++) {
+                    sum += S[(Bc * y) + tx] * __half2float(Qi[(y * d) + x]);
+                }
+
+                sum *= softmax_scale;
+                atomicAdd(&dK[qkv_offset + (row_tile_size * j) + txd + x], sum);
+            }
+        }
+    }
+}
+
+__global__
+void flash_attention_2_forward_kernelHalf(
+    const __half* Q,
+    const __half* K,
+    const __half* V,
+    const int N,
+    const int d,
+    const int Tc,
+    const int Tr,
+    const int Bc,
+    const int Br,
+    const float softmax_scale,
+    const int q_start_offset,
+    float* L,
+    __half* O
+) {
+    const float INFINITY = 9999999999.9f; 
+    int tx = threadIdx.x;
+    int txd = tx * d;
+
+    int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
+    int bz = blockIdx.z; // Tr index
+
+    // Offset into Q,K,V,O - different for each batch and head
+    int qkv_offset = (bx * gridDim.y * N * d) + (by * N * d);  // gridDim.y = nh
+    int lm_offset = (bx * gridDim.y * N) + (by * N);  // offset for L
+
+    // Define SRAM for Q,K,V,S
+    extern __shared__ float sramb[];
+    __half *sram = (__half *)sramb;
+
+    int tile_size = Bc * d;  // size of Qi, Kj, Vj
+    __half* Qi = sram;
+    __half* KVj = &sram[tile_size];
+    //__half* S = &sram[tile_size * 2];
+
+    int i = bz;
+    if (i >= q_start_offset && i < Tr)
+    {       
+        if (i * Br + tx >= N)
+            return;  // break if we are done with the sequence
+
+        // Load Qi from HBM to SRAM, l and m to registers
+
+        for (int x = 0; x < d; x++) {
+            Qi[txd + x] = Q[qkv_offset + (tile_size * i) + txd + x];
+        }
+        float row_m_prev = -INFINITY;
+        float row_l_prev = 0;
+        float lS[256];
+
+        // Causal mask: j <= i
+        for (int j = 0; j <= i; ++j) {
+            __syncthreads();
+            // Load Kj, Vj from HBM to SRAM
+
+            for (int x = 0; x < d; x++) {
+                KVj[txd + x] = K[qkv_offset + (tile_size * j) + txd + x];
+            }
+            
+            __syncthreads();
+
+            // S_i^j = softmax_scale * QiKj^T
+            // S_i^j[tx][y] = softmax_scale * Sum_{x = 0}^{d-1} Qi[tx][x] * Kj[y][x]
+            float row_m = -INFINITY;
+
+            for (int y = 0; y < Bc; y++) {
+                if (j * Bc + y >= N)
+                    break;  // break if we are done with the sequence
+                if (i * Br + tx < j * Bc + y)
+                    break;
+                float sum = 0;
+
+                    for (int x = 0; x < d; x++)
+                        sum += __half2float(__hmul(Qi[txd + x], KVj[(y * d) + x]));
+                 
+                sum *= softmax_scale;
+                lS[y] = sum;
+
+                if (sum > row_m)
+                    row_m = sum;
+            }
+
+            // m_i^j = max(m_i^j-1, row_max(S_i^j))
+            float new_row_m = max(row_m_prev, row_m);
+
+            // P_i^j = exp(S_i^j - m_i^j)
+            // P_i^j[tx][y] = exp(S_i^j[tx][y] - m_i^j)
+            float row_l = 0;
+            for (int y = 0; y < Bc; y++) {
+                if (j * Bc + y >= N)
+                    break;  // break if we are done with the sequence
+                if (i * Br + tx < j * Bc + y)
+                    break;
+
+                float r = __expf(lS[y] - new_row_m);
+                lS[y] = r;
+                row_l += r;
+            }
+
+            __syncthreads();
+            for (int x = 0; x < d; x++) {
+                KVj[txd + x] = V[qkv_offset + (tile_size * j) + txd + x];
+            }
+            __syncthreads();
+
+            // l_i^j = (exp(m_i^j-1 - m_i^j) * l_i^j-1) + row_sum(P_i^j)
+            float row_m_exp = __expf(row_m_prev - new_row_m);
+            float new_row_l = (row_m_exp * row_l_prev) + row_l;
+
+            // O_i^j = diag(exp(m_i^j-1 - m_i^j))^-1 * O_i^j-1 + P_i^jVj
+            for (int x = 0; x < d; x++) {
+                float pv = 0;  // Pij * Vj
+                for (int y = 0; y < Bc; y++) {
+                    if (j * Bc + y >= N)
+                        break;  // break if we are done with the sequence
+                    if (i * Br + tx < j * Bc + y)
+                        break;
+                    pv += lS[y] * __half2float(KVj[(y * d) + x]);
+                }
+                O[qkv_offset + (tile_size * i) + txd + x] = \
+                    __float2half(row_m_exp * __half2float(O[qkv_offset + (tile_size * i) + txd + x]) + pv);
+            }
+
+            // Update m and l
+            row_m_prev = new_row_m;
+            row_l_prev = new_row_l;
+        }
+
+        // O_i = diag(l_i^{Tc})^-1 * O_i^{Tc}
+        for (int x = 0; x < d; x++)
+            O[qkv_offset + (tile_size * i) + txd + x] = __hdiv(O[qkv_offset + (tile_size * i) + txd + x], __float2half(row_l_prev));
+        // L_i = m_i^{Tc} + log(l_i^{Tc})
+        L[lm_offset + (Br * i) + tx] = row_m_prev + __logf(row_l_prev);
+    }
+}
+
+__global__
+void flash_attention_2_backward_kernelHalf(
+    const __half* Q,
+    const __half* K,
+    const __half* V,
+    const __half* O,
+    const __half* dO,
+    const float* L,
+    const int N,
+    const int d,
+    const int Tc,
+    const int Tr,
+    const int Bc,
+    const int Br,
+    const float softmax_scale,
+    __half* dQ,
+    __half* dK,
+    __half* dV,
+    float* Stmp
+) {
+    const float INFINITY = 9999999999.9f; 
+    int tx = threadIdx.x;
+    int txd = tx * d;
+    int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
+    int bz = blockIdx.z; // Tc index;
+
+    // Offset into Q,K,V,O - different for each batch and head
+    int qkv_offset = (bx * gridDim.y * N * d) + (by * N * d);  // gridDim.y = nh
+    int lm_offset = (bx * gridDim.y * N) + (by * N);  // offset for L
+
+    // Define SRAM for Q,K,V,S
+    extern __shared__ float sramb[];
+    __half* sram = (__half*)sramb;
+
+    int col_tile_size = Bc * d;  // size of Kj, Vj
+    int row_tile_size = Br * d;  // size of Qi
+    __half* Kj = sram;
+    __half* Vj = &sram[col_tile_size];
+
+    __half* Qi = &sram[col_tile_size * 2];
+    __half* dOi = &sram[col_tile_size * 2 + row_tile_size];
+
+    // We also use S for P. Likewise, we use dS for dP.
+    // We can reuse the same memory because we don't need S and P at the same time.
+    // We also don't need dS and dP at the same time.
+    //__half* S = &sram[col_tile_size * 2 + row_tile_size * 2];
+    
+    int stmp_offset = (bx * gridDim.y * Br * Br) + (by * Br * Br);  // gridDim.y = nh
+    float* S = &Stmp[stmp_offset];
+
+     int j = bz;
+     if (j < Tc) {
+
+        // Load Kj, Vj to SRAM
+        for (int x = 0; x < d; x++) {
+            Kj[txd + x] = K[qkv_offset + (col_tile_size * j) + txd + x];
+            Vj[txd + x] = V[qkv_offset + (col_tile_size * j) + txd + x];
+        }
+
+        for (int i = j; i < Tr; i++)  {
+            __syncthreads();
+            // Load Qi, Oi, dOi, dQi, li, mi to SRAM
+            // Also load l, m to registers
+            float Di = 0;
+
+                for (int x = 0; x < d; x++) {
+                    Qi[txd + x] = Q[qkv_offset + (row_tile_size * i) + txd + x];
+                    __half dO_v = dO[qkv_offset + (row_tile_size * i) + txd + x];
+                    dOi[txd + x] = dO_v;
+                    Di += __half2float(__hmul(dO_v, O[qkv_offset + (row_tile_size * i) + txd + x]));
+                }
+            
+
+            float l_curr = L[lm_offset + (Br * i) + tx];
+
+            // Sij = softmax_scale * QiKj^T
+            // Sij[tx][y] = softmax_scale * Sum_{y = 0}^{Bc-1} Qi[tx][x] * Kj[y][x]
+
+            // Pij = diag(li)^-1 * exp(Sij - mi)
+            // Pij[tx][y] = (1 / li[tx]) * exp(Sij[tx][y] - mi[tx])
+            for (int y = 0; y < Bc; y++) {
+                float sum = 0;
+
+                    for (int x = 0; x < d; x++) {
+                        sum += __half2float(__hmul(Qi[txd + x], Kj[(y * d) + x]));
+                    }
+                
+                sum *= softmax_scale;
+                if (i * Br + tx < j * Bc + y)
+                    S[(Bc * tx) + y] = 0;
+                else
+                    S[(Bc * tx) + y] = __expf(sum - l_curr);
+            }
+
+            __syncthreads();
+            // dVj <- dVj + Pij^T * dOi
+            // dVj[tx][x] = dVj[tx][x] + Sum_{y = 0}^{Br-1} Pij[y][tx] * dOi[tx][x]
+            for (int x = 0; x < d; x++) {
+                float sum = 0;
+                float dOi_x = dOi[txd + x];              
+
+                    for (int y = 0; y < Br; y++) {
+                        sum += S[(Bc * y) + tx] * dOi_x;
+                    }
+                
+                atomicAdd(&dV[qkv_offset + (row_tile_size * j) + txd + x], __float2half(sum));
+            }
+
+            // dPij <- dOi * Vj^T
+            // dPij[tx][y] = Sum_{x = 0}^{d-1} dOi[tx][x] * Vj[y][x]
+
+            // dSij <- Pij * (dPij - Di)
+            // dSij[tx][y] = Pij[tx][y] * (dPij[tx][y] - Di[tx])
+            for (int y = 0; y < Bc; y++) {
+                float sum = 0;
+
+                for (int x = 0; x < d; x++) {
+                    sum += __half2float(__hmul(dOi[txd + x], Vj[(y * d) + x]));
+                }
+                
+                S[(Bc * tx) + y] = S[(Bc * tx) + y] * (sum - Di);
+            }
+
+            // dQi <- dQi + softmax_scale * dSijKj
+            // dQ[tx][x] = dQ[tx][x] + softmax_scale * Sum_{y = 0}^{Bc-1} dSij[tx][y] * Kj[y][x]
+            for (int x = 0; x < d; x++) {
+                float sum = 0;
+
+                for (int y = 0; y < Bc; y++) {
+                    sum += S[(Bc * tx) + y] * __half2float(Kj[(y * d) + x]);
+                }
+                sum *= softmax_scale;
+                atomicAdd(&dQ[qkv_offset + (row_tile_size * i) + txd + x], __float2half(sum));
+            }
+            __syncthreads();
+            // dKj <- dKj + softmax_scale * dSij^TQi
+            // dKj[tx][x] = dKj[tx][x] + softmax_scale * Sum_{y = 0}^{Br-1} dSij[y][tx] * Qi[y][x]
+            for (int x = 0; x < d; x++) {
+                float sum = 0;
+                for (int y = 0; y < Br; y++) {
+                    sum += S[(Bc * y) + tx] * __half2float(Qi[(y * d) + x]);
+                }
+
+                sum *= softmax_scale;
+                atomicAdd(&dK[qkv_offset + (row_tile_size * j) + txd + x], __float2half(sum));
+            }
+        }
+    }
+}
+
+}
+
+";
         private static readonly string Code = @"
 extern ""C""
 {
@@ -204,26 +790,29 @@ __global__ void gLayerNormalizationGrad(float* gradX,
 
 __global__ void RMSNorm(float* out,
                                 const float* in,
-                                const float* alpha,
+                                const float* gamma,
                                 const float* beta,
                                 int rows,
                                 int cols,
-                                float eps = 1e-9) {
-  extern __shared__ float _share[];
+                                float eps = 1e-9,
+                                bool bias = false) {
+  extern __shared__ float _shareAccType[];
 
+  float N = cols;
   for(int bid = 0; bid < rows; bid += gridDim.x) {
     int j = bid + blockIdx.x;
     if(j < rows) {
-      float* so = out + j * cols;
-      const float* sp = in + j * cols;
+      float* yRow       = out + j * cols;
+      const float* xRow =  in + j * cols;
 
-      float* _sqSum = _share;
-      _sqSum[threadIdx.x] = 0.0;
+      float* _sqSum = _shareAccType;
+
+      _sqSum[threadIdx.x] = (float)0.0f;
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          float ex = sp[id];
-          _sqSum[threadIdx.x] += ex * ex;
+          float xv = (float)xRow[id];
+          _sqSum[threadIdx.x] += xv * xv;
         }
       }
       __syncthreads();
@@ -236,16 +825,18 @@ __global__ void RMSNorm(float* out,
         len = (len + 1) >> 1;
       }
       __syncthreads();
-      float sigma = sqrtf(eps + (_sqSum[0] / cols));
+      float rms = sqrtf(_sqSum[0] / N + eps); // all AccType
       __syncthreads();
 
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          float t = alpha[id] * sp[id] / sigma;
-          if(beta)
-            t += beta[id];
-          so[id] = t;
+          float gammav  = gamma[id];
+          float xv      = xRow[id];
+          float betav   = bias ? beta[id] : 0.0f;
+          float rmsNorm = xv / rms;
+          float y       = gammav * rmsNorm + betav;
+          yRow[id]        = y;
         }
       }
     }
@@ -264,31 +855,37 @@ __global__ void RMSNormGrad(float* gradX,
                                         float* beta,
                                         int rows,
                                         int cols,
-                                        float eps = 1e-9) {
+                                        float eps = 1e-9,
+                                        bool bias = false) {
   extern __shared__ float shared[];
+
+  float N = cols;
 
   for(int bid = 0; bid < rows; bid += gridDim.x) {
     int j = bid + blockIdx.x;
     if(j < rows) {
-      float* sum_adj = shared;
-      float* sum_adj_x = shared + blockDim.x;
-      float* sum_sqr = shared + 2 * blockDim.x;
+      float* sum_adj_r = shared;  // sum of gradient coming in times layerNorm from value
+      float* sum_sqr   = shared + blockDim.x;  // sum of x^2
 
-      const float* xRow = x + j * cols;
-      const float* yRow = y + j * cols;
+      const float* xRow   =   x + j * cols;
+      const float* yRow   =   y + j * cols;
       const float* adjRow = adj + j * cols;
-      float* gradXRow = gradX + j * cols;
 
-      sum_adj[threadIdx.x] = 0.0f;
-      sum_adj_x[threadIdx.x] = 0.0f;
-      sum_sqr[threadIdx.x] = 0.0f;
+      sum_adj_r[threadIdx.x] = (float)0.0f;
+      sum_sqr[threadIdx.x]   = (float)0.0f;
 
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          sum_adj_x[threadIdx.x]
-              += adjRow[id] * (yRow[id] - ((beta) ? beta[id] : 0)) / gamma[id];
-          sum_adj[threadIdx.x] += adjRow[id];
+          float xv     = xRow[id];
+          float yv     = yRow[id];
+          float betav  = bias ? beta[id] : 0.0f;
+          float gammav = (float)gamma[id];
+          float adjv   = adjRow[id];
+          float rv     = (yv - betav) / gammav; // go back to RMSNorm(x) from scaled and shifted version for accumulation
+
+          sum_adj_r[threadIdx.x] += adjv * rv;
+          sum_sqr[threadIdx.x]   += xv * xv;
         }
       }
       __syncthreads();
@@ -297,53 +894,49 @@ __global__ void RMSNormGrad(float* gradX,
         __syncthreads();
         int skip = (len + 1) >> 1;
         if(threadIdx.x < (len >> 1)) {
-          sum_adj[threadIdx.x] += sum_adj[threadIdx.x + skip];
-          sum_adj_x[threadIdx.x] += sum_adj_x[threadIdx.x + skip];
+          sum_adj_r[threadIdx.x] += sum_adj_r[threadIdx.x + skip]; // Accumulates in AccType
+          sum_sqr[threadIdx.x]   += sum_sqr[threadIdx.x   + skip]; // Accumulates in AccType
         }
         len = (len + 1) >> 1;
       }
+
       __syncthreads();
+      float rms = sqrtf(sum_sqr[0] / N + eps);
+      __syncthreads();
+
+      // Jacobian of RMS norm
+      // J = [ \frac{1}{N * rms} (N\delta_{ij} - RN_i RN_j) ]_{ij}
+      // J * a = dC/dx_i = ( N a_i - RN_i \sum_j RN_j a_j ) / (N * rms)
 
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          float ex = xRow[id];
-          sum_sqr[threadIdx.x] += ex * ex;
-        }
-      }
 
-      __syncthreads();
-      len = blockDim.x;
-      while(len != 1) {
-        __syncthreads();
-        int skip = (len + 1) >> 1;
-        if(threadIdx.x < (len >> 1))
-          sum_sqr[threadIdx.x] += sum_sqr[threadIdx.x + skip];
-        len = (len + 1) >> 1;
-      }
-      __syncthreads();
-      float sigma = sqrtf(eps + (sum_sqr[0] / cols));
-      __syncthreads();
+          float xv      = xRow[id];
+          float gammav  = (float)gamma[id];
+          float adjv    = adjRow[id];
+          float rmsNorm = xv / rms;
 
-      for(int tid = 0; tid < cols; tid += blockDim.x) {
-        int id = tid + threadIdx.x;
-        if(id < cols) {
-          float grad_x = 0.0f;
-          float x_hat = (yRow[id] - ((beta) ? beta[id] : 0)) / gamma[id];
-          grad_x += cols * adjRow[id];
-          grad_x -= sum_adj[0];
-          grad_x -= sum_adj_x[0] * x_hat;
-          grad_x /= (cols * sigma);
+          float gradNorm = N * adjv - rmsNorm * sum_adj_r[0];
+          gradNorm        /= N * rms; 
 
-          float valX = gamma[id] * grad_x;
-          float sign = (0.f < valX) - (valX < 0.f);
-          valX = fabs(valX) > 1000.0f ? sign * 1000.0f : valX;
+          float gradXv = gammav * gradNorm;
 
-          gradXRow[id] += valX;
-          atomicAdd(gradGamma + id, adjRow[id] * x_hat);
-          if(beta) {
-            atomicAdd(gradBeta + id, adjRow[id]);
-          }
+          // Keep RMSN gradient between [-1000, 1000] for TensorOps, this currently used for making values fit into fp16. This wil also clip inf. 
+          // @TODO: to be fixed and removed.
+          float sign = (0.f < gradXv) - (gradXv < 0.f);  //functional::Ops<AccType>::sgn(gradXv);
+          float cutoff = (float)1000.f; // @TODO: expose this somehow as an option? or better: make obsolete.
+          gradXv = fabs(gradXv) > cutoff ? sign * cutoff : gradXv; // if gradXv is NaN the value return is NaN too because NaN > value is false.
+
+          // @TODO: frankly, this is embarrasing and should rather be removed or optional? It does help for low precision computation though. Maybe turn into option?
+          gradXv = isnan(gradXv) ? 0.f : gradXv; // turn NaN into 0.
+
+          float* gradXRow      = gradX     + j * cols;
+          gradXRow[id]    += (float)(gradXv);
+
+          atomicAdd(gradGamma + id, (float)(adjv * rmsNorm));
+          if (bias)
+              atomicAdd(gradBeta + id, adjRow[id]);
         }
       }
     }
@@ -559,7 +1152,7 @@ __global__ void Adam(float* __restrict__ w, float* __restrict__ g, float* __rest
         int i = tid + threadIdx.x;
         if(i < cols)
         {
-           float g = sg[i] / gradNormFactor;
+           float g = sg[i] * gradNormFactor;
 
            if (g > clipval)
            {
@@ -649,7 +1242,7 @@ __global__ void RMSProp(float* __restrict__ w, float* __restrict__ g, float* __r
   }
 }
 
-  __global__ void RoPE(float* __restrict__ result, float* __restrict__ src, int rows, int cols, int seqLen)
+  __global__ void RoPE(float* __restrict__ result, float* __restrict__ src, int rows, int cols, int seqLen, int rowOffset)
   {
     for(int bid = 0; bid < rows; bid += gridDim.x)
     {
@@ -658,7 +1251,7 @@ __global__ void RMSProp(float* __restrict__ w, float* __restrict__ g, float* __r
     {
       float* resultRow = result + j * cols;
       float* srcRow = src + j * cols;
-      int m = j % seqLen;
+      int m = (j % seqLen) + rowOffset;
 
       for(int tid = 0; tid < cols; tid += blockDim.x)
       {
@@ -685,7 +1278,7 @@ __global__ void RMSProp(float* __restrict__ w, float* __restrict__ g, float* __r
   }
 }
 
-  __global__ void RoPEGrad(float* __restrict__ grad, float* __restrict__ adj, int rows, int cols, int seqLen)
+  __global__ void RoPEGrad(float* __restrict__ grad, float* __restrict__ adj, int rows, int cols, int seqLen, int rowOffset)
   {
     for(int bid = 0; bid < rows; bid += gridDim.x)
     {
@@ -694,7 +1287,7 @@ __global__ void RMSProp(float* __restrict__ w, float* __restrict__ g, float* __r
     {
       float* gradRow = grad + j * cols;
       float* adjRow = adj + j * cols;
-      int m = j % seqLen;
+      int m = (j % seqLen) + rowOffset;
 
       for(int tid = 0; tid < cols; tid += blockDim.x)
       {
@@ -1101,7 +1694,6 @@ __global__ void TopK(float* input, float* output, float *outputIdx, int k, unsig
 #include <cuda_fp16.h>
 extern ""C""
 {
-
 __global__ void gLNormalizationHalf(__half* out,
                                 const __half* in,
                                 const __half* alpha,
@@ -1283,26 +1875,29 @@ __global__ void gLayerNormalizationGradHalf(__half* gradX,
 
 __global__ void RMSNormHalf(__half* out,
                                 const __half* in,
-                                const __half* alpha,
+                                const __half* gamma,
                                 const __half* beta,
                                 int rows,
                                 int cols,
-                                float eps = 1e-9) {
-  extern __shared__ float _share[];
+                                float eps = 1e-9,
+                                bool bias = false) {
+  extern __shared__ float _shareAccType[];
 
+  float N = cols;
   for(int bid = 0; bid < rows; bid += gridDim.x) {
     int j = bid + blockIdx.x;
     if(j < rows) {
-      __half* so = out + j * cols;
-      const __half* sp = in + j * cols;
+      __half* yRow       = out + j * cols;
+      const __half* xRow =  in + j * cols;
 
-      float* _sqSum = _share;
-      _sqSum[threadIdx.x] = 0.0;
+      float* _sqSum = _shareAccType;
+
+      _sqSum[threadIdx.x] = (float)0.0f;
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          float ex = __half2float(sp[id]);
-          _sqSum[threadIdx.x] += ex * ex;
+          float xv = __half2float(xRow[id]);
+          _sqSum[threadIdx.x] += xv * xv;
         }
       }
       __syncthreads();
@@ -1315,16 +1910,18 @@ __global__ void RMSNormHalf(__half* out,
         len = (len + 1) >> 1;
       }
       __syncthreads();
-      float sigma = sqrtf(eps + (_sqSum[0] / cols));
+      float rms = sqrtf(_sqSum[0] / N + eps); // all AccType
       __syncthreads();
 
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          float t = __half2float(alpha[id]) * __half2float(sp[id]) / sigma;
-          if(beta)
-            t += __half2float(beta[id]);
-          so[id] = __float2half(t);
+          float gammav  = __half2float(gamma[id]);
+          float xv      = xRow[id];
+          float betav   = bias ? __half2float(beta[id]) : 0.0f;
+          float rmsNorm = xv / rms;
+          float y       = gammav * rmsNorm + betav;
+          yRow[id]        = __float2half(y);
         }
       }
     }
@@ -1344,31 +1941,37 @@ __global__ void RMSNormGradHalf(__half* gradX,
                                         __half* beta,
                                         int rows,
                                         int cols,
-                                        float eps = 1e-9) {
-  extern __shared__ float shared[];
+                                        float eps = 1e-9,
+                                        bool bias = false) {
+extern __shared__ float shared[];
+
+  float N = cols;
 
   for(int bid = 0; bid < rows; bid += gridDim.x) {
     int j = bid + blockIdx.x;
     if(j < rows) {
-      float* sum_adj = shared;
-      float* sum_adj_x = shared + blockDim.x;
-      float* sum_sqr = shared + 2 * blockDim.x;
+      float* sum_adj_r = shared;  // sum of gradient coming in times layerNorm from value
+      float* sum_sqr   = shared + blockDim.x;  // sum of x^2
 
-      const __half* xRow = x + j * cols;
-      const __half* yRow = y + j * cols;
+      const __half* xRow   =   x + j * cols;
+      const __half* yRow   =   y + j * cols;
       const __half* adjRow = adj + j * cols;
-      __half* gradXRow = gradX + j * cols;
 
-      sum_adj[threadIdx.x] = 0.0f;
-      sum_adj_x[threadIdx.x] = 0.0f;
-      sum_sqr[threadIdx.x] = 0.0f;
+      sum_adj_r[threadIdx.x] = (float)0.0f;
+      sum_sqr[threadIdx.x]   = (float)0.0f;
 
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          sum_adj_x[threadIdx.x]
-              += __half2float(adjRow[id]) * (__half2float(yRow[id]) - ((beta) ? __half2float(beta[id]) : 0)) / __half2float(gamma[id]);
-          sum_adj[threadIdx.x] += __half2float(adjRow[id]);
+          float xv     = __half2float(xRow[id]);
+          float yv     = __half2float(yRow[id]);
+          float betav  = bias ? __half2float(beta[id]) : 0.0f;
+          float gammav = (float)__half2float(gamma[id]);
+          float adjv   = __half2float(adjRow[id]);
+          float rv     = (yv - betav) / gammav; // go back to RMSNorm(x) from scaled and shifted version for accumulation
+
+          sum_adj_r[threadIdx.x] += adjv * rv;
+          sum_sqr[threadIdx.x]   += xv * xv;
         }
       }
       __syncthreads();
@@ -1377,53 +1980,49 @@ __global__ void RMSNormGradHalf(__half* gradX,
         __syncthreads();
         int skip = (len + 1) >> 1;
         if(threadIdx.x < (len >> 1)) {
-          sum_adj[threadIdx.x] += sum_adj[threadIdx.x + skip];
-          sum_adj_x[threadIdx.x] += sum_adj_x[threadIdx.x + skip];
+          sum_adj_r[threadIdx.x] += sum_adj_r[threadIdx.x + skip]; // Accumulates in AccType
+          sum_sqr[threadIdx.x]   += sum_sqr[threadIdx.x   + skip]; // Accumulates in AccType
         }
         len = (len + 1) >> 1;
       }
+
       __syncthreads();
+      float rms = sqrtf(sum_sqr[0] / N + eps);
+      __syncthreads();
+
+      // Jacobian of RMS norm
+      // J = [ \frac{1}{N * rms} (N\delta_{ij} - RN_i RN_j) ]_{ij}
+      // J * a = dC/dx_i = ( N a_i - RN_i \sum_j RN_j a_j ) / (N * rms)
 
       for(int tid = 0; tid < cols; tid += blockDim.x) {
         int id = tid + threadIdx.x;
         if(id < cols) {
-          float ex = __half2float(xRow[id]);
-          sum_sqr[threadIdx.x] += ex * ex;
-        }
-      }
 
-      __syncthreads();
-      len = blockDim.x;
-      while(len != 1) {
-        __syncthreads();
-        int skip = (len + 1) >> 1;
-        if(threadIdx.x < (len >> 1))
-          sum_sqr[threadIdx.x] += sum_sqr[threadIdx.x + skip];
-        len = (len + 1) >> 1;
-      }
-      __syncthreads();
-      float sigma = sqrtf(eps + (sum_sqr[0] / cols));
-      __syncthreads();
+          float xv      = __half2float(xRow[id]);
+          float gammav  = (float)__half2float(gamma[id]);
+          float adjv    = __half2float(adjRow[id]);
+          float rmsNorm = xv / rms;
 
-      for(int tid = 0; tid < cols; tid += blockDim.x) {
-        int id = tid + threadIdx.x;
-        if(id < cols) {
-          float grad_x = 0.0f;
-          float x_hat = (__half2float(yRow[id]) - ((beta) ? __half2float(beta[id]) : 0)) / __half2float(gamma[id]);
-          grad_x += cols * __half2float(adjRow[id]);
-          grad_x -= sum_adj[0];
-          grad_x -= sum_adj_x[0] * x_hat;
-          grad_x /= (cols * sigma);
+          float gradNorm = N * adjv - rmsNorm * sum_adj_r[0];
+          gradNorm        /= N * rms; 
 
-          float valX = __half2float(gamma[id]) * grad_x;
-          float sign = (0.f < valX) - (valX < 0.f);
-          valX = fabs(valX) > 1000.0f ? sign * 1000.0f : valX;
+          float gradXv = gammav * gradNorm;
 
-          gradXRow[id] = __hadd(gradXRow[id], __float2half(valX));
-          atomicAdd(gradGamma + id, __float2half(__half2float(adjRow[id]) * x_hat));
-          if(beta) {
-            atomicAdd(gradBeta + id, adjRow[id]);
-          }
+          // Keep RMSN gradient between [-1000, 1000] for TensorOps, this currently used for making values fit into fp16. This wil also clip inf. 
+          // @TODO: to be fixed and removed.
+          float sign = (0.f < gradXv) - (gradXv < 0.f);  //functional::Ops<AccType>::sgn(gradXv);
+          float cutoff = (float)1000.f; // @TODO: expose this somehow as an option? or better: make obsolete.
+          gradXv = fabs(gradXv) > cutoff ? sign * cutoff : gradXv; // if gradXv is NaN the value return is NaN too because NaN > value is false.
+
+          // @TODO: frankly, this is embarrasing and should rather be removed or optional? It does help for low precision computation though. Maybe turn into option?
+          gradXv = isnan(gradXv) ? 0.f : gradXv; // turn NaN into 0.
+
+          __half* gradXRow      = gradX     + j * cols;
+          gradXRow[id]    = __hadd(gradXRow[id], __float2half(gradXv));
+
+          atomicAdd(gradGamma + id, __float2half(adjv * rmsNorm));
+          if (bias)
+              atomicAdd(gradBeta + id, adjRow[id]);
         }
       }
     }
@@ -1433,7 +2032,7 @@ __global__ void RMSNormGradHalf(__half* gradX,
 
 
 
-__global__ void RoPEGradHalf(__half* __restrict__ grad, __half* __restrict__ adj, int rows, int cols, int seqLen)
+__global__ void RoPEGradHalf(__half* __restrict__ grad, __half* __restrict__ adj, int rows, int cols, int seqLen, int rowOffset)
   {
     for(int bid = 0; bid < rows; bid += gridDim.x)
     {
@@ -1442,7 +2041,7 @@ __global__ void RoPEGradHalf(__half* __restrict__ grad, __half* __restrict__ adj
     {
       __half* gradRow = grad + j * cols;
       __half* adjRow = adj + j * cols;
-      int m = j % seqLen;
+      int m = (j % seqLen) + rowOffset;
 
       for(int tid = 0; tid < cols; tid += blockDim.x)
       {
@@ -1471,7 +2070,7 @@ __global__ void RoPEGradHalf(__half* __restrict__ grad, __half* __restrict__ adj
 
 
 
-  __global__ void RoPEHalf(__half* __restrict__ result, __half* __restrict__ src, int rows, int cols, int seqLen)
+  __global__ void RoPEHalf(__half* __restrict__ result, __half* __restrict__ src, int rows, int cols, int seqLen, int rowOffset)
   {
     for(int bid = 0; bid < rows; bid += gridDim.x)
     {
@@ -1480,7 +2079,7 @@ __global__ void RoPEGradHalf(__half* __restrict__ grad, __half* __restrict__ adj
     {
       __half* resultRow = result + j * cols;
       __half* srcRow = src + j * cols;
-      int m = j % seqLen;
+      int m = (j % seqLen) + rowOffset;
 
       for(int tid = 0; tid < cols; tid += blockDim.x)
       {
@@ -1507,7 +2106,7 @@ __global__ void RoPEGradHalf(__half* __restrict__ grad, __half* __restrict__ adj
   }
 }
 
-__global__ void AdamHalf(__half* __restrict__ w, __half* __restrict__ g, float* __restrict__ v, float* __restrict__ m, unsigned rows, unsigned cols, int batchSize, float step_size, float clipval, float regc, float decay_rate_v, float decay_rate_m, int iter, float eps)
+__global__ void AdamHalf(__half* __restrict__ w, __half* __restrict__ g, float* __restrict__ v, float* __restrict__ m, unsigned rows, unsigned cols, float gradNormFactor, float step_size, float clipval, float regc, float decay_rate_v, float decay_rate_m, int iter, float eps)
 {
       float bias_correction1 = 1.0 / (1.0 - powf(decay_rate_m, iter));
       float bias_correction2 = 1.0 / (1.0 - powf(decay_rate_v, iter));
@@ -1528,7 +2127,7 @@ __global__ void AdamHalf(__half* __restrict__ w, __half* __restrict__ g, float* 
         int i = tid + threadIdx.x;
         if(i < cols)
         {
-           float g = __half2float(sg[i]) / batchSize;
+           float g = __half2float(sg[i]) * gradNormFactor;
 
            if (g > clipval)
            {
@@ -1541,8 +2140,7 @@ __global__ void AdamHalf(__half* __restrict__ w, __half* __restrict__ g, float* 
 
            sm[i] = sm[i] * decay_rate_m + (1.0 - decay_rate_m) * g;
            sv[i] = sv[i] * decay_rate_v + (1.0 - decay_rate_v) * g * g;
-
-           sw[i] = __float2half(__half2float(sw[i]) - (adapted_learning_rate * sm[i] / (sqrtf(sv[i]) + eps)));
+           sw[i] = __float2half(__half2float(sw[i]) - (adapted_learning_rate * sm[i] / (sqrtf(sv[i]) + eps)));           
         }
       }
     }
@@ -1887,13 +2485,21 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
             {
                 Logger.WriteLine(Logger.Level.debug, "Building advanced kernels for both FP32 and FP16.");
 
-                return Code + CodeHalf;
+                return Code + CodeHalf + CodeFlashAttention;
             }
             else
             {
                 Logger.WriteLine(Logger.Level.debug, "Building advanced kernels for both FP32.");
 
-                return Code;
+                if (TSCudaContext.UseFlashAttention)
+                {
+                    Logger.WriteLine(Logger.Level.debug, "Building kernels for FlashAttention V2");
+                    return Code + CodeFlashAttention;
+                }
+                else
+                {
+                    return Code;
+                }
             }
         }
 
@@ -1986,10 +2592,175 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
         }
 
 
+
+        public Tensor FlashAttention(Tensor O, Tensor L, Tensor Q, Tensor K, Tensor V, int q_start_offset = 0)
+        {
+            TSCudaContext context = CudaHelpers.TSContextForTensor(Q);
+            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(O, Q, true, Q.Sizes);
+            FlashAttention(context, Q, K, V, writeTarget, L, q_start_offset);
+
+            return writeTarget;
+        }
+
+        private void FlashAttention(TSCudaContext context, Tensor Q, Tensor K, Tensor V, Tensor O, Tensor L, int q_start_offset = 0)
+        {
+            try
+            {
+                CudaContext cudaContext = context.CudaContextForTensor(O);
+                cudaContext.SetCurrent();
+
+                int B = (int)Q.Sizes[0];
+                int nh = (int)Q.Sizes[1];
+                int N = (int)Q.Sizes[2];
+                int d = (int)Q.Sizes[3];
+
+                int Br = Math.Min(64, N);
+                while (Br > 1)
+                {
+                    if (N % Br == 0)
+                    {
+                        break;
+                    }
+                    Br--;
+                }
+                int Bc = Br;
+
+                int Tc = (int)Math.Ceiling((float)N / Bc);
+                int Tr = (int)Math.Ceiling((float)N / Br);
+
+                
+                if (Tr > Br && Tr < 64)
+                {
+                    //Switch Tr and Br so that we could have more thread in a block
+                    int tmp = Br;
+                    Br = Tr;
+                    Tr = tmp;
+
+                    Bc = Br;
+                    Tc = Tr;
+                }
+
+                float softmax_scale = (float)(1.0 / Math.Sqrt(d));
+                int startTr = q_start_offset / Br;
+
+                // Calculate SRAM size needed per block
+                int col_tile_size = Bc * d;  // size of Kj, Vj
+                int row_tile_size = Br * d;  // size of Qi
+                int sram_size =
+                    (col_tile_size * 2)  // SRAM size for Kj, Vj
+                    + (row_tile_size * 2);  // SRAM size for Qi
+                //    + (Bc * Br * 2);  // SRAM size for S
+
+                dim3 grid = new dim3(B, nh, Tr);
+                dim3 block = new dim3(Br);
+
+
+                string kernelName = "flash_attention_2_forward_kernel";
+                CUdeviceptr QPtr = CudaHelpers.GetBufferStart(Q);
+                CUdeviceptr KPtr = CudaHelpers.GetBufferStart(K);
+                CUdeviceptr VPtr = CudaHelpers.GetBufferStart(V);
+                CUdeviceptr OPtr = CudaHelpers.GetBufferStart(O);
+                CUdeviceptr LPtr = CudaHelpers.GetBufferStart(L);
+
+                if (O.ElementType == DType.Float16)
+                {
+                    kernelName += "Half";
+                }
+                Invoke(context, cudaContext, kernelName, grid, block, (uint)sram_size,
+                CUstream.NullStream, QPtr, KPtr, VPtr, N, d, Tc, Tr, Bc, Br, softmax_scale, startTr, LPtr, OPtr);
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteLine($"Exception: {ex.Message}");
+                Logger.WriteLine($"Call Stack: {ex.StackTrace}");
+            }
+        }
+
+        public void FlashAttentionGrad(Tensor Q, Tensor K, Tensor V, Tensor O, Tensor dO, Tensor L, Tensor dQ, Tensor dK, Tensor dV)
+        {
+            TSCudaContext context = CudaHelpers.TSContextForTensor(Q);
+            FlashAttentionGrad(context, Q, K, V, O, dO, L, dQ, dK, dV);
+        }
+
+
+        private void FlashAttentionGrad(TSCudaContext context, Tensor Q, Tensor K, Tensor V, Tensor O, Tensor dO, Tensor L,
+            Tensor dQ, Tensor dK, Tensor dV)
+        {
+            try
+            {
+                CudaContext cudaContext = context.CudaContextForTensor(O);
+                cudaContext.SetCurrent();
+
+                int B = (int)Q.Sizes[0];
+                int nh = (int)Q.Sizes[1];
+                int N = (int)Q.Sizes[2];
+                int d = (int)Q.Sizes[3];
+
+                int Br = Math.Min(64, N);
+                while (Br > 1)
+                {
+                    if (N % Br == 0)
+                    {
+                        break;
+                    }
+                    Br--;
+                }
+                int Bc = Br;
+
+                int Tc = (int)Math.Ceiling((float)N / Bc);
+                int Tr = (int)Math.Ceiling((float)N / Br);
+                float softmax_scale = (float)(1.0 / Math.Sqrt(d));
+
+                // Calculate SRAM size needed per block
+                int col_tile_size = Bc * d;  // size of dKj, dVj
+                int row_tile_size = Br * d;  // size of Qi, dOi
+                int sram_size =
+                    (2 * col_tile_size * 2)  // SRAM size for dKj, dVj
+                    + (2 * row_tile_size * 2);  // SRAM size for Qi, dOi
+                //    + (Br * Bc * 2);  // SRAM size for S
+
+                dim3 grid = new dim3(B, nh, Tc);
+                dim3 block = new dim3(Br);
+
+
+                string kernelName = "flash_attention_2_backward_kernel";
+                CUdeviceptr QPtr = CudaHelpers.GetBufferStart(Q);
+                CUdeviceptr KPtr = CudaHelpers.GetBufferStart(K);
+                CUdeviceptr VPtr = CudaHelpers.GetBufferStart(V);
+                CUdeviceptr OPtr = CudaHelpers.GetBufferStart(O);
+                CUdeviceptr dOPtr = CudaHelpers.GetBufferStart(dO);
+                CUdeviceptr LPtr = CudaHelpers.GetBufferStart(L);
+                CUdeviceptr dKPtr = CudaHelpers.GetBufferStart(dK);
+                CUdeviceptr dQPtr = CudaHelpers.GetBufferStart(dQ);
+                CUdeviceptr dVPtr = CudaHelpers.GetBufferStart(dV);
+
+
+                Tensor STmp = new Tensor(Q.Allocator, elementType: DType.Float32, new long[] { B * nh * Br * Br });
+                CUdeviceptr STmpPtr = CudaHelpers.GetBufferStart(STmp);
+
+                if (O.ElementType == DType.Float16)
+                {
+                    kernelName += "Half";
+                }
+
+                Invoke(context, cudaContext, kernelName, grid, block, (uint)sram_size,
+                    CUstream.NullStream, QPtr, KPtr, VPtr, OPtr, dOPtr, LPtr, N, d, Tc, Tr, Bc, Br, softmax_scale,
+                    dQPtr, dKPtr, dVPtr, STmpPtr);
+
+                STmp.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteLine($"Exception: {ex.Message}");
+                Logger.WriteLine($"Call Stack: {ex.StackTrace}");
+            }
+        }
+
+
         public Tensor RMSNormGrad(Tensor outGrad, Tensor alphaGrad, Tensor betaGrad, Tensor inGrad, Tensor y, Tensor x, Tensor alpha, Tensor beta, float eps = 1e-9f)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(inGrad);
-            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(outGrad, inGrad, false, inGrad.Sizes);
+            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(outGrad, inGrad, true, inGrad.Sizes);
             RMSNormGrad(context, writeTarget, alphaGrad, betaGrad, inGrad, y, x, alpha, beta, eps);
 
             return writeTarget;
@@ -2018,26 +2789,27 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
 
             CUdeviceptr outGradPtr = CudaHelpers.GetBufferStart(outGrad);
             CUdeviceptr alphaGradPtr = CudaHelpers.GetBufferStart(alphaGrad);
-            CUdeviceptr betaGradPtr = CudaHelpers.GetBufferStart(betaGrad);
+            CUdeviceptr betaGradPtr = (betaGrad != null) ? CudaHelpers.GetBufferStart(betaGrad) : new CUdeviceptr();
             CUdeviceptr inGradPtr = CudaHelpers.GetBufferStart(inGrad);
             CUdeviceptr yPtr = CudaHelpers.GetBufferStart(y);
             CUdeviceptr xPtr = CudaHelpers.GetBufferStart(x);
             CUdeviceptr alphaPtr = CudaHelpers.GetBufferStart(alpha);
-            CUdeviceptr betaPtr = CudaHelpers.GetBufferStart(beta);
+            CUdeviceptr betaPtr = (beta != null) ? CudaHelpers.GetBufferStart(beta) : new CUdeviceptr();
+            bool bias = (beta != null);
 
             string kernelName = "RMSNormGrad";
             if (outGrad.ElementType == DType.Float16)
             {
                 kernelName = "RMSNormGradHalf";
             }
-            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float) * 4, CUstream.NullStream, outGradPtr, alphaGradPtr, betaGradPtr, inGradPtr, yPtr, xPtr, alphaPtr, betaPtr, rows, cols, eps);
+            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float) * 4, CUstream.NullStream, outGradPtr, alphaGradPtr, betaGradPtr, inGradPtr, yPtr, xPtr, alphaPtr, betaPtr, rows, cols, eps, bias);
         }
 
         public void AddLayerNormGrad(Tensor out1Grad, Tensor out2Grad, Tensor alphaGrad, Tensor betaGrad, Tensor inGrad, Tensor y, Tensor x1, Tensor x2, Tensor alpha, Tensor beta, float eps = 1e-9f)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(inGrad);
-            Tensor writeTarget1 = TensorResultBuilder.GetWriteTarget(out1Grad, inGrad, false, inGrad.Sizes);
-            Tensor writeTarget2 = TensorResultBuilder.GetWriteTarget(out2Grad, inGrad, false, inGrad.Sizes);
+            Tensor writeTarget1 = TensorResultBuilder.GetWriteTarget(out1Grad, inGrad, true, inGrad.Sizes);
+            Tensor writeTarget2 = TensorResultBuilder.GetWriteTarget(out2Grad, inGrad, true, inGrad.Sizes);
             AddLayerNormGrad(context, writeTarget1, writeTarget2, alphaGrad, betaGrad, inGrad, y, x1, x2, alpha, beta, eps);
         }
 
@@ -2080,7 +2852,7 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
         public Tensor LayerNorm(Tensor result, Tensor src, Tensor alpha, Tensor beta, float eps = 1e-9f)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(src);
-            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, false, src.Sizes);
+            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, true, src.Sizes);
             LayerNorm(context, writeTarget, src, alpha, beta, eps);
 
             return writeTarget;
@@ -2127,7 +2899,7 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
         public Tensor RMSNorm(Tensor result, Tensor src, Tensor alpha, Tensor beta, float eps = 1e-9f)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(src);
-            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, false, src.Sizes);
+            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, true, src.Sizes);
             RMSNorm(context, writeTarget, src, alpha, beta, eps);
 
             return writeTarget;
@@ -2136,6 +2908,15 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
 
         private void RMSNorm(TSCudaContext context, Tensor result, Tensor src, Tensor alpha, Tensor beta, float eps = 1e-9f)
         {
+            if (src.IsContiguous() == false)
+            {
+                throw new Exception($"Tensor {nameof(src)} is not contiguous.");
+            }
+            if (result.IsContiguous() == false)
+            {
+                throw new Exception($"Tensor {nameof(result)} is not contiguous.");
+            }
+
             CudaContext cudaContext = context.CudaContextForTensor(src);
 
             cudaContext.SetCurrent();
@@ -2158,7 +2939,8 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
             CUdeviceptr resultPtr = CudaHelpers.GetBufferStart(result);
             CUdeviceptr srcPtr = CudaHelpers.GetBufferStart(src);
             CUdeviceptr alphaPtr = CudaHelpers.GetBufferStart(alpha);
-            CUdeviceptr betaPtr = CudaHelpers.GetBufferStart(beta);
+            CUdeviceptr betaPtr = (beta != null) ? CudaHelpers.GetBufferStart(beta) : new CUdeviceptr();
+            bool bias = (beta != null);
 
             string kernelName = "RMSNorm";
             if (src.ElementType == DType.Float16)
@@ -2166,14 +2948,14 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
                 kernelName = "RMSNormHalf";
             }
 
-            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, resultPtr, srcPtr, alphaPtr, betaPtr, rows, cols, eps);
+            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, resultPtr, srcPtr, alphaPtr, betaPtr, rows, cols, eps, bias);
 
         }
 
         public Tensor AddLayerNorm(Tensor result, Tensor src1, Tensor src2, Tensor alpha, Tensor beta, float eps = 1e-9f)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(src1);
-            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src1, false, src1.Sizes);
+            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src1, true, src1.Sizes);
             AddLayerNorm(context, writeTarget, src1, src2, alpha, beta, eps);
 
             return writeTarget;
@@ -2407,7 +3189,7 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
         }
 
 
-        private void RoPE(TSCudaContext context, Tensor result, Tensor src, int seqLen)
+        private void RoPE(TSCudaContext context, Tensor result, Tensor src, long seqLen, long rowOffset)
         {
             CudaContext cudaContext = context.CudaContextForTensor(src);
 
@@ -2448,11 +3230,11 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
             }
 
 
-            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, resultPtr, srcPtr, rows, cols, seqLen);
+            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, resultPtr, srcPtr, rows, cols, seqLen, rowOffset);
 
         }
 
-        private void RoPEGrad(TSCudaContext context, Tensor grad, Tensor adj, int seqLen)
+        private void RoPEGrad(TSCudaContext context, Tensor grad, Tensor adj, int seqLen, int rowOffset)
         {
             CudaContext cudaContext = context.CudaContextForTensor(adj);
 
@@ -2493,7 +3275,7 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
             }
 
 
-            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, gradPtr, adjPtr, rows, cols, seqLen);
+            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, gradPtr, adjPtr, rows, cols, seqLen, rowOffset);
         }
 
 
@@ -2602,49 +3384,57 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
 
         private void Softmax(TSCudaContext context, Tensor result, Tensor src)
         {
-            if (result.ElementType != src.ElementType)
+            try
             {
-                throw new ArgumentException($"The element type between source and result must be same.");
+                if (result.ElementType != src.ElementType)
+                {
+                    throw new ArgumentException($"The element type between source and result must be same.");
+                }
+
+                CudaContext cudaContext = context.CudaContextForTensor(src);
+
+                cudaContext.SetCurrent();
+
+                if (result.IsContiguous() == false)
+                {
+                    throw new Exception($"Tensor {nameof(result)} is not contiguous.");
+                }
+                if (src.IsContiguous() == false)
+                {
+                    throw new Exception($"Tensor {nameof(src)} is not contiguous.");
+                }
+
+                int ndim = src.DimensionCount;
+                long storageSize = TensorDimensionHelpers.GetStorageSize(src.Sizes, src.Strides);
+                long cols = src.Sizes[ndim - 1];
+
+                if (storageSize % cols != 0)
+                {
+                    throw new Exception($"Invalid tensor storage size = '{storageSize}', and cols = '{cols}'");
+                }
+
+                long rows = storageSize / cols;
+
+
+                dim3 block = new dim3((uint)Math.Min(512, cols));
+                dim3 grid = new dim3((uint)Math.Min(1024, ApplyUtils.CeilDiv(rows, block.y)));
+
+                CUdeviceptr resultPtr = CudaHelpers.GetBufferStart(result);
+                CUdeviceptr srcPtr = CudaHelpers.GetBufferStart(src);
+
+                string kernelName = "gSoftmax";
+                if (src.ElementType == DType.Float16)
+                {
+                    kernelName = "gSoftmaxHalf";
+                }
+
+                Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, resultPtr, srcPtr, rows, cols);
             }
-
-            CudaContext cudaContext = context.CudaContextForTensor(src);
-
-            cudaContext.SetCurrent();
-
-            if (result.IsContiguous() == false)
+            catch (Exception e)
             {
-                throw new Exception($"Tensor {nameof(result)} is not contiguous.");
+                Logger.WriteLine($"Error Message in Softmax: {e.Message}");
+                Logger.WriteLine($"Stack: {e.TargetSite}");
             }
-            if (src.IsContiguous() == false)
-            {
-                throw new Exception($"Tensor {nameof(src)} is not contiguous.");
-            }
-
-            int ndim = src.DimensionCount;
-            long storageSize = TensorDimensionHelpers.GetStorageSize(src.Sizes, src.Strides);
-            long cols = src.Sizes[ndim - 1];
-
-            if (storageSize % cols != 0)
-            {
-                throw new Exception($"Invalid tensor storage size = '{storageSize}', and cols = '{cols}'");
-            }
-
-            long rows = storageSize / cols;
-
-
-            dim3 block = new dim3((uint)Math.Min(512, cols));
-            dim3 grid = new dim3((uint)Math.Min(1024, ApplyUtils.CeilDiv(rows, block.y)));
-
-            CUdeviceptr resultPtr = CudaHelpers.GetBufferStart(result);
-            CUdeviceptr srcPtr = CudaHelpers.GetBufferStart(src);
-
-            string kernelName = "gSoftmax";
-            if (src.ElementType == DType.Float16)
-            {
-                kernelName = "gSoftmaxHalf";
-            }
-
-            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, resultPtr, srcPtr, rows, cols);
         }
 
         private void Adam(TSCudaContext context, Tensor weight, Tensor gradient, Tensor v, Tensor m, float gradNormFactor, float step_size, float clipval, float regc, float decay_rate_v, float decay_rate_m, int iter, float eps)
@@ -2777,13 +3567,23 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
             }
 
 
-            Invoke(context, cudaContext, kernelName, grid, block, block.x * sizeof(float), CUstream.NullStream, gradPtr, adjPtr, valPtr, rows, cols, iAddGrad);
+            Invoke(context, cudaContext, kernelName, grid, block, (block.x + 1) * sizeof(float), CUstream.NullStream, gradPtr, adjPtr, valPtr, rows, cols, iAddGrad);
         }
 
         public bool IsCorrupted(Tensor src)
         {
-            TSCudaContext context = CudaHelpers.TSContextForTensor(src);
-            return IsCorrupted(context, src);
+            try
+            {
+                TSCudaContext context = CudaHelpers.TSContextForTensor(src);
+                return IsCorrupted(context, src);
+            }
+            catch (Exception e)
+            {
+                Logger.WriteLine(e.Message);
+                Logger.WriteLine(e.StackTrace);
+
+                return true;
+            }
         }
 
         public Tensor Softmax(Tensor result, Tensor src)
@@ -2867,19 +3667,19 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
         }
 
 
-        public Tensor RoPE(Tensor result, Tensor src, int seqLen)
+        public Tensor RoPE(Tensor result, Tensor src, int seqLen, int rowOffset)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(src);
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, true, src.Sizes);
-            RoPE(context, writeTarget, src, seqLen);
+            RoPE(context, writeTarget, src, seqLen, rowOffset);
 
             return writeTarget;
         }
 
-        public Tensor RoPEGrad(Tensor grad, Tensor adj, int seqLen)
+        public Tensor RoPEGrad(Tensor grad, Tensor adj, int seqLen, int rowOffset)
         {
             TSCudaContext context = CudaHelpers.TSContextForTensor(adj);
-            RoPEGrad(context, grad, adj, seqLen);
+            RoPEGrad(context, grad, adj, seqLen, rowOffset);
 
             return grad;
         }
@@ -2887,7 +3687,7 @@ for(int bid = 0; bid < rows; bid += gridDim.x) {
         private void Invoke(TSCudaContext context, CudaContext cudaContext, string kernelName, dim3 grid, dim3 block, uint smemSize, CUstream stream, params object[] args)
         {
             byte[] ptx = GetPtx(context.Compiler);
-            CudaKernel kernel = context.KernelCache.Get(cudaContext, ptx, kernelName);
+            CudaKernel kernel = context.KernelCache.Get(cudaContext, ptx, kernelName, maxDynamicSharedSizeBytes: (smemSize > (48 * 1024)) ? (int)smemSize : 0); // The default static sharted memory size is 48K, if we want to have more, we need to set its attribute to a larger value.
             kernel.GridDimensions = grid;
             kernel.BlockDimensions = block;
             kernel.DynamicSharedMemory = smemSize;

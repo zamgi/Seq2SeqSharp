@@ -38,6 +38,16 @@ namespace GPTConsole
             }
         }
 
+
+        private static void Ss_KVCacheRemoveWatcher(object sender, EventArgs e)
+        {
+            KVCacheRemoveEventArg ep = e as KVCacheRemoveEventArg;
+            if (ep.Reason != "Removed")
+            {
+                Logger.WriteLine(Logger.Level.debug, $"KV Cache Removed due to '{ep.Reason}' Key = '{ep.Key}'");
+            }
+        }
+
         private static void Main(string[] args)
         {
             try
@@ -48,11 +58,15 @@ namespace GPTConsole
                 {
                     Console.WriteLine($"Loading config file from '{opts.ConfigFilePath}'");
                     opts = JsonConvert.DeserializeObject<Seq2SeqOptions>(File.ReadAllText(opts.ConfigFilePath));
+                    argParser = new ArgParser(args, opts);
                 }
 
                 Logger.Initialize(opts.LogDestination, opts.LogLevel, $"{nameof(GPTConsole)}_{opts.Task}_{Utils.GetTimeStamp(DateTime.Now)}.log");
 
-                ShowOptions(args, opts);
+                if ((opts.LogLevel & Logger.Level.debug) == Logger.Level.debug)
+                {
+                    ShowOptions(args, opts);
+                }
 
                 DecodingOptions decodingOptions = opts.CreateDecodingOptions();
                 GPT ss = null;
@@ -60,7 +74,7 @@ namespace GPTConsole
                 {
                     // Load train corpus
                     var trainCorpus = new SeqCorpus(corpusFilePath: opts.TrainCorpusPath, tgtLangName: opts.TgtLang, maxTokenSizePerBatch: opts.MaxTokenSizePerBatch,
-                        maxTgtSentLength: opts.MaxTgtSentLength, paddingEnums: opts.PaddingType, tooLongSequence: opts.TooLongSequence, indexedFilePath: opts.IndexedCorpusPath, startBatchId: opts.StartBatchId);
+                        maxTgtSentLength: opts.MaxTgtSentLength, paddingEnums: opts.PaddingType, tooLongSequence: opts.TooLongSequence, indexedFilePath: opts.IndexedCorpusPath, startBatchId: opts.StartBatchId, dataPassword: opts.DataPassword);
 
                     // Create learning rate
                     ILearningRate learningRate = null;
@@ -126,6 +140,7 @@ namespace GPTConsole
 
                     //Test trained model
                     ss = new GPT(opts);
+                    ss.KVCacheRemoveWatcher += Ss_KVCacheRemoveWatcher;
                     Stopwatch stopwatch = Stopwatch.StartNew();
 
                     if (String.IsNullOrEmpty(opts.OutputPromptFile))
@@ -178,13 +193,12 @@ namespace GPTConsole
             }
         }
 
-
         private static void ShowOptions(string[] args, Seq2SeqOptions opts)
         {
             var commandLine = string.Join(" ", args);
             var strOpts = JsonConvert.SerializeObject(opts, Newtonsoft.Json.Formatting.Indented, new JsonSerializerSettings() { NullValueHandling = NullValueHandling.Ignore, Converters = new[] { new StringEnumConverter() }, });
 
-            Logger.WriteLine($"Seq2SeqSharp v2.7.0 written by Zhongkai Fu(fuzhongkai@gmail.com)");
+            Logger.WriteLine($"Seq2SeqSharp v2.8.16 written by Zhongkai Fu(fuzhongkai@gmail.com)");
             Logger.WriteLine($"Command Line = '{commandLine}'");
             Logger.WriteLine($"Configs: {strOpts}");
         }

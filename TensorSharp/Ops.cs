@@ -190,8 +190,8 @@ namespace TensorSharp
         public static Tensor IndexSelectGrad(Tensor grad, Tensor adj, Tensor indice) { return (Tensor)OpRegistry.Invoke("indexselectgrad", grad, adj, indice); }
 
 
-        public static Tensor RoPE(Tensor result, Tensor src, int seqLen) { return (Tensor)OpRegistry.Invoke("rope", result, src, seqLen); }
-        public static Tensor RoPEGrad(Tensor grad, Tensor adj, int seqLen) { return (Tensor)OpRegistry.Invoke("ropegrad", grad, adj, seqLen); }
+        public static Tensor RoPE(Tensor result, Tensor src, int seqLen, int rowOffset) { return (Tensor)OpRegistry.Invoke("rope", result, src, seqLen, rowOffset); }
+        public static Tensor RoPEGrad(Tensor grad, Tensor adj, int seqLen, int rowOffset) { return (Tensor)OpRegistry.Invoke("ropegrad", grad, adj, seqLen, rowOffset); }
 
 
         public static Tensor BuildSrcTgtMask(Tensor result, Tensor srcOriginalLengths, Tensor tgtOriginalLengths, int srcPaddedSeqLength, int tgtPaddedSeqLength, float value, float maskedValue)
@@ -224,6 +224,16 @@ namespace TensorSharp
         public static Tensor LayerNormGrad(Tensor outGrad, Tensor alphaGrad, Tensor betaGrad, Tensor inGrad, Tensor y, Tensor x, Tensor alpha, Tensor beta, float eps = 1e-09f) 
         { 
             return (Tensor)OpRegistry.Invoke("layernormgrad", outGrad, alphaGrad, betaGrad, inGrad, y, x, alpha, beta, eps);
+        }
+
+        public static Tensor FlashAttention(Tensor O, Tensor L, Tensor Q, Tensor K, Tensor V, int q_start_offset = 0)
+        {
+            return (Tensor)OpRegistry.Invoke("flashattention", O, L, Q, K, V, q_start_offset);
+        }
+
+        public static void FlashAttentionGrad(Tensor Q, Tensor K, Tensor V, Tensor O, Tensor dO, Tensor L, Tensor dQ, Tensor dK, Tensor dV)
+        {
+            OpRegistry.Invoke("flashattentiongrad", Q, K, V, O, dO, L, dQ, dK, dV);
         }
 
         public static Tensor RMSNorm(Tensor result, Tensor src, Tensor alpha, Tensor beta, float eps = 1e-09f) { return (Tensor)OpRegistry.Invoke("rmsnorm", result, src, alpha, beta, eps); }

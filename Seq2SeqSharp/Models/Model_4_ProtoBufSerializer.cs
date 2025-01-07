@@ -241,7 +241,7 @@ namespace Seq2SeqSharp.Models
                 Name2Weights = new Dictionary<string, float[]>();
             }
 
-            Name2WeightsHalf = m.Name2WeightsHalf;
+            Name2WeightsHalf = m.Name2WeightsHalf.usDict;
             if (Name2WeightsHalf == null)
             {
                 Name2WeightsHalf = new Dictionary<string, ushort[]>();
@@ -284,6 +284,8 @@ namespace Seq2SeqSharp.Models
             ExpertsPerTokenFactor = m.ExpertsPerTokenFactor;              
             PEType= m.PEType;
             NormType = m.NormType;
+            MultiHeadAttentionType = m.MultiHeadAttentionType;
+            KVGroupNum = m.KVGroupNum;
         }
         public static Model_4_ProtoBufSerializer Create(Model m) => new Model_4_ProtoBufSerializer(m);
 
@@ -317,5 +319,7 @@ namespace Seq2SeqSharp.Models
 
         [ProtoMember(28)] public PositionEmbeddingEnums PEType { get; set; }
         [ProtoMember(29)] public NormEnums NormType { get; set; }
+        [ProtoMember(30)] public MultiHeadAttentionTypeEnums MultiHeadAttentionType { get; set; }
+        [ProtoMember(31)] public int KVGroupNum { get; set; }
     }
 }

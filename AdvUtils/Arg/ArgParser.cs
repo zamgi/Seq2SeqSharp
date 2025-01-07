@@ -10,24 +10,43 @@ namespace AdvUtils
         object m_o;
         List<ArgField> m_arrayArgs;
 
-		public ArgParser(string[] args, object o)
-		{
-			m_o = o;
-            m_arrayArgs = new List<ArgField>();
-			Type typeArgAttr = typeof(Arg);
-			Type t = o.GetType();
-			foreach (FieldInfo fi in t.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
-			{
-				foreach (Arg arg in fi.GetCustomAttributes(typeArgAttr, true))
-				{
-					m_arrayArgs.Add(new ArgField(o, fi, arg));
-				}
-			}
+        //public static void UpdateFieldValue(object obj, string fieldName, string newValue)
+        //{
+        //    // Get the Type of the object
+        //    Type objType = obj.GetType();
 
-			try
-			{
-				for (int i = 0; i < args.Length; i++)
-				{
+        //    // Get the FieldInfo for the specified field name
+        //    FieldInfo fieldInfo = objType.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+        //    // If the field is found, set the new value
+        //    if (fieldInfo != null)
+        //    {
+        //        fieldInfo.SetValue(obj, newValue);
+        //    }
+        //    else
+        //    {
+        //        Console.WriteLine($"Field '{fieldName}' not found in the class.");
+        //    }
+        //}
+
+        public ArgParser(string[] args, object o)
+        {
+            m_o = o;
+            m_arrayArgs = new List<ArgField>();
+            Type typeArgAttr = typeof(Arg);
+            Type t = o.GetType();
+            foreach (FieldInfo fi in t.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+            {
+                foreach (Arg arg in fi.GetCustomAttributes(typeArgAttr, true))
+                {
+                    m_arrayArgs.Add(new ArgField(o, fi, arg));
+                }
+            }
+
+            try
+            {
+                for (int i = 0; i < args.Length; i++)
+                {
                     if (args[i].StartsWith("-"))
                     {
                         string strArgName = args[i].Substring(1);
@@ -40,20 +59,19 @@ namespace AdvUtils
                         }
 
                         intarg.Set(strArgValue);
-
                         i++;
                     }
-				}
+                }
 
-				foreach (ArgField a in m_arrayArgs)
-					a.Validate();
-			}
-			catch (Exception err)
-			{
+                foreach (ArgField a in m_arrayArgs)
+                    a.Validate();
+            }
+            catch (Exception err)
+            {
                 Console.Error.WriteLine(err.Message);
-				Usage();
-			}
-		}
+                Usage();
+            }
+        }
 
         ArgField? GetArgByName(string name)
 		{

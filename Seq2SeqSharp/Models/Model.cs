@@ -16,9 +16,36 @@ using ManagedCuda.BasicTypes;
 using Seq2SeqSharp.Applications;
 using Seq2SeqSharp.Utils;
 using Seq2SeqSharp.Enums;
+using TensorSharp;
+using System.Runtime.InteropServices;
+using System.Data;
 
 namespace Seq2SeqSharp.Models
 {
+    [StructLayout(LayoutKind.Explicit)]
+    public class Name2WeightsHalf
+    {
+        [FieldOffset(0)] public Dictionary<string, ushort[]> usDict;
+        [FieldOffset(0)] public Dictionary<string, half[]> halfDict;
+
+        public Name2WeightsHalf()
+        {
+            usDict = new Dictionary<string, ushort[]>();
+        }
+
+        public void Clear()
+        {
+            if (usDict != null)
+            {
+                usDict.Clear();
+            }
+            else
+            {
+                usDict = new Dictionary<string, ushort[]>();
+            }
+        }
+    }
+
     [Serializable]
     public abstract class Model : IModel
     {
@@ -55,7 +82,7 @@ namespace Seq2SeqSharp.Models
 
         public Dictionary<string, float[]> Name2Weights { get; set; }
 
-        public Dictionary<string, ushort[]> Name2WeightsHalf { get; set; }
+        public Name2WeightsHalf Name2WeightsHalf { get; set; }
 
         public VQTypeEnums VQType { get; set; }
         public Dictionary<string, byte[]> Name2WeightsVQ { get; set; }       
@@ -63,6 +90,9 @@ namespace Seq2SeqSharp.Models
 
         public PositionEmbeddingEnums PEType { get; set; }
         public NormEnums NormType { get; set; }
+
+        public MultiHeadAttentionTypeEnums MultiHeadAttentionType { get; set; }
+        public int KVGroupNum { get; set; }
 
         public Model() { }
         public Model(Options opts,Vocab srcVocab, Vocab tgtVocab)
@@ -84,9 +114,11 @@ namespace Seq2SeqSharp.Models
             VQType = opts.VQType;
             PEType = opts.PEType;
             NormType = opts.NormType;
+            MultiHeadAttentionType = opts.MultiHeadAttentionType;
+            KVGroupNum = opts.KVGroupNum;
 
             Name2Weights = new Dictionary<string, float[]>();
-            Name2WeightsHalf= new Dictionary<string, ushort[]>();
+            Name2WeightsHalf = new Name2WeightsHalf();
             Name2WeightsVQ = new Dictionary<string, byte[]>();
             Name2CodeBook = new Dictionary<string, double[]>();
         }
@@ -111,20 +143,25 @@ namespace Seq2SeqSharp.Models
             VQType = m.VQType;
 
             Name2Weights = m.Name2Weights;
-            Name2WeightsHalf = m.Name2WeightsHalf;
+            Name2WeightsHalf = new Name2WeightsHalf();
+            Name2WeightsHalf.usDict = m.Name2WeightsHalf;
             Name2WeightsVQ = m.Name2WeightsVQ;
             Name2CodeBook = m.Name2CodeBook;
             PEType = m.PEType;
             NormType = m.NormType;
+
+            MultiHeadAttentionType = m.MultiHeadAttentionType;
+            KVGroupNum = m.KVGroupNum;
+
 
             if (Name2Weights == null)
             {
                 Name2Weights = new Dictionary<string, float[]>();
             }
 
-            if (Name2WeightsHalf == null)
+            if (Name2WeightsHalf.usDict == null)
             {
-                Name2WeightsHalf = new Dictionary<string, ushort[]>();
+                Name2WeightsHalf.usDict = new Dictionary<string, ushort[]>();
             }
 
             if (Name2WeightsVQ == null)
@@ -149,7 +186,7 @@ namespace Seq2SeqSharp.Models
                 {
                     weightsHalf[i] = (new half(weights[i])).x;
                 }
-                Name2WeightsHalf.Add(name, weightsHalf);
+                Name2WeightsHalf.usDict.Add(name, weightsHalf);
             }
             else if (VQType == VQTypeEnums.INT8)
             {
@@ -227,7 +264,7 @@ namespace Seq2SeqSharp.Models
             {
                 weight = Name2Weights[name];
             }
-            else if (Name2WeightsHalf.ContainsKey(name))
+            else if (Name2WeightsHalf.halfDict.ContainsKey(name))
             {
                 throw new InvalidCastException($"The model is saved as Float16 type, so please enable AMP for model loading.");
             }
@@ -288,14 +325,16 @@ namespace Seq2SeqSharp.Models
                     weights[i] = new half(values[i]);
                 }
             }
-            else if (Name2WeightsHalf.ContainsKey(name))
+            else if (Name2WeightsHalf.halfDict.ContainsKey(name))
             {
-                var values = Name2WeightsHalf[name];
-                weights = new half[values.Length];
-                for (int i = 0; i < values.Length; i++)
-                {
-                    weights[i] = new half(values[i]);
-                }
+                weights = Name2WeightsHalf.halfDict[name];
+
+                //var values = Name2WeightsHalf[name];
+                //weights = new half[values.Length];
+                //for (int i = 0; i < values.Length; i++)
+                //{
+                //    weights[i] = new half(values[i]);
+                //}
             }
             else if (VQType == VQTypeEnums.INT8)
             {
@@ -358,9 +397,9 @@ namespace Seq2SeqSharp.Models
                 Name2Weights.Remove(name);
             }
 
-            if (Name2WeightsHalf != null && Name2WeightsHalf.ContainsKey(name))
+            if (Name2WeightsHalf != null && Name2WeightsHalf.halfDict.ContainsKey(name))
             {
-                Name2WeightsHalf.Remove(name);
+                Name2WeightsHalf.halfDict.Remove(name);
             }
         }
 

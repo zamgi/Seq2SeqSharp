@@ -79,7 +79,7 @@ namespace Seq2SeqSharp.Utils
     }
 
     public static class Misc
-    {
+    {       
         public static void AppendNewBatch(List<List<string>> inputBatchs, string line, int maxTokenLength)
         {
             List<string> tokens = line.Trim().Split(' ').ToList();
@@ -117,7 +117,7 @@ namespace Seq2SeqSharp.Utils
             IOptimizer optimizer = null;
             if (string.Equals(opts.Optimizer, "Adam", StringComparison.InvariantCultureIgnoreCase))
             {
-                optimizer = new AdamOptimizer(opts.GradClip, opts.Beta1, opts.Beta2, opts.SaveGPUMemoryMode);
+                optimizer = new AdamOptimizer(opts.GradClip, opts.Beta1, opts.Beta2, opts.SaveGPUMemoryLevel);
             }
             else
             {

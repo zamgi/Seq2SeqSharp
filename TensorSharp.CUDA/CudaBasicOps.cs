@@ -614,10 +614,10 @@ namespace TensorSharp.CUDA
 
 
         [RegisterOpStorageType("rope", typeof(CudaStorage))]
-        public Tensor RoPE(Tensor result, Tensor src, int seqLen) { return advFuncKernels.RoPE(result, src, seqLen); }
+        public Tensor RoPE(Tensor result, Tensor src, int seqLen, int rowOffset) { return advFuncKernels.RoPE(result, src, seqLen, rowOffset); }
 
         [RegisterOpStorageType("ropegrad", typeof(CudaStorage))]
-        public Tensor RoPEGrad(Tensor grad, Tensor adj, int seqLen) { return advFuncKernels.RoPEGrad(grad, adj, seqLen); }
+        public Tensor RoPEGrad(Tensor grad, Tensor adj, int seqLen, int rowOffset) { return advFuncKernels.RoPEGrad(grad, adj, seqLen, rowOffset); }
 
 
 
@@ -675,7 +675,11 @@ namespace TensorSharp.CUDA
         [RegisterOpStorageType("rmsnormgrad", typeof(CudaStorage))]
         public Tensor RMSNormGrad(Tensor outGrad, Tensor alphaGrad, Tensor betaGrad, Tensor inGrad, Tensor y, Tensor x, Tensor alpha, Tensor beta, float eps = 1e-09f) { return advFuncKernels.RMSNormGrad(outGrad, alphaGrad, betaGrad, inGrad, y, x, alpha, beta, eps); }
 
+        [RegisterOpStorageType("flashattention", typeof(CudaStorage))]
+        public Tensor FlashAttention(Tensor O, Tensor L, Tensor Q, Tensor K, Tensor V, int q_start_offset = 0) { return advFuncKernels.FlashAttention(O, L, Q, K, V, q_start_offset); }
 
+        [RegisterOpStorageType("flashattentiongrad", typeof(CudaStorage))]
+        public void FlashAttentionGrad(Tensor Q, Tensor K, Tensor V, Tensor O, Tensor dO, Tensor L, Tensor dQ, Tensor dK, Tensor dV) { advFuncKernels.FlashAttentionGrad(Q, K, V, O, dO, L, dQ, dK, dV); }
 
 
         [RegisterOpStorageType("addlayernorm", typeof(CudaStorage))]
