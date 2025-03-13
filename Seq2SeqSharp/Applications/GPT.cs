@@ -20,6 +20,7 @@ using Seq2SeqSharp.Models;
 using Seq2SeqSharp.Tools;
 using Seq2SeqSharp.Utils;
 using TensorSharp;
+using ManagedCuda.BasicTypes;
 
 namespace Seq2SeqSharp.Applications
 {
@@ -120,7 +121,7 @@ namespace Seq2SeqSharp.Applications
 
             DType elementType = m_options.AMP ? DType.Float16 : DType.Float32;
 
-            m_decoder = Decoder.CreateDecoders(model, m_options, raDeviceIds, elementType);
+            m_decoder = Decoder.CreateDecoders(model, m_options, raDeviceIds, isTrainable: m_options.IsDecoderTrainable && (m_options.Task == ModeEnums.Train), elementType: elementType);
             m_decoderFFLayer = new MultiProcessorNetworkWrapper<IFeedForwardLayer>(new FeedForwardLayer("FeedForward_Decoder_0", model.HiddenDim, model.TgtVocab.Count, dropoutRatio: 0.0f, deviceId: raDeviceIds.GetNextItem(),
                 isTrainable: (m_options.Task == ModeEnums.Train), learningRateFactor: m_options.DecoderStartLearningRateFactor, elementType), DeviceIds);
 
@@ -144,13 +145,28 @@ namespace Seq2SeqSharp.Applications
                     m_posEmbedding?.GetNetworkOnDevice(deviceIdIdx));
         }
 
+        /// <summary>
+        /// Generate key for kv cache. </s> will be removed from the key if it exist
+        /// </summary>
+        /// <param name="strs"></param>
+        /// <returns></returns>
         private string GenerateCacheKey(List<List<string>> strs)
         {
             List<string> r = new List<string>();
 
             foreach (var str in strs)
             {
-                r.Add(string.Join(" ", str));
+                List<string> normStr = new List<string>();
+                foreach (string word in str)
+                {
+                    if (word == "</s>")
+                    {
+                        continue;
+                    }
+                    normStr.Add(word);
+                }
+
+                r.Add(string.Join(" ", normStr));
             }
 
             return string.Join("\t", r);
